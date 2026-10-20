@@ -155,8 +155,28 @@ jobs:
           path: |
             tufan-*.tar.gz
 
+  arch:
+    # The official Arch image is x86_64 only.
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v5
+      - name: makepkg
+        run: |
+          pacman -Syu --noconfirm --needed gtk4 rust
+          sed -i "s/^pkgver=.*/pkgver=${GITHUB_REF_NAME#v}/" packaging/arch/PKGBUILD
+          # makepkg refuses to run as root.
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && makepkg --noconfirm"
+          mv packaging/arch/tufan-[0-9]*.pkg.tar.zst .
+      - uses: actions/upload-artifact@v5
+        with:
+          name: arch-x86_64
+          path: tufan-*.pkg.tar.zst
+
   publish:
-    needs: [linux, macos, windows, freebsd]
+    needs: [linux, macos, windows, freebsd, arch]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
@@ -169,6 +189,7 @@ jobs:
           prerelease: true
           generate_release_notes: true
           body: |
-            First milestone build. Built in CI; only Linux x86-64 has been tested by hand.
+            Built in CI; only Linux x86-64 has been tested by hand.
+            Arch Linux: `sudo pacman -U tufan-*-x86_64.pkg.tar.zst`.
             macOS GTK binaries require `brew install gtk4`. FreeBSD build is CLI-only.
             Not signed or notarized. See README for guarantees and limitations.
