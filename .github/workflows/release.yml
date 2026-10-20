@@ -56,7 +56,12 @@ jobs:
           rpmbuild --define "_topdir $PWD/rpm" --define "debug_package %{nil}" -bb rpm/SPECS/tufan.spec
           cp rpm/RPMS/*/*.rpm .
       - uses: actions/upload-artifact@v4
-        with: { name: linux-${{ matrix.arch }}, path: "tufan*.tar.gz\ntufan_*.deb\ntufan-*.rpm" }
+        with:
+          name: linux-${{ matrix.arch }}
+          path: |
+            tufan*.tar.gz
+            tufan_*.deb
+            tufan-*.rpm
 
   macos:
     strategy:
@@ -83,7 +88,11 @@ jobs:
           mkdir dmg && cp -R Tufan.app dmg/ && ln -s /Applications dmg/Applications && cp $N/REQUIREMENTS.txt dmg/
           hdiutil create -volname Tufan -srcfolder dmg -format UDZO $N.dmg
       - uses: actions/upload-artifact@v4
-        with: { name: macos-${{ matrix.arch }}, path: "tufan-*.tar.gz\ntufan-*.dmg" }
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            tufan-*.tar.gz
+            tufan-*.dmg
 
   windows:
     runs-on: windows-latest
@@ -119,7 +128,11 @@ jobs:
           makensis -DVERSION=$V -DARCH=x86_64 -DBINDIR="$(cygpath -w "$PWD/dist")" packaging/windows/tufan.nsi
           mv packaging/windows/Tufan-*-setup.exe .
       - uses: actions/upload-artifact@v4
-        with: { name: windows-x86_64, path: "tufan-*.zip\nTufan-*-setup.exe" }
+        with:
+          name: windows-x86_64
+          path: |
+            tufan-*.zip
+            Tufan-*-setup.exe
 
   freebsd:
     runs-on: ubuntu-24.04
@@ -136,7 +149,10 @@ jobs:
             mkdir -p $N && cp target/release/tufan README.md $N/
             tar czf $N.tar.gz $N
       - uses: actions/upload-artifact@v4
-        with: { name: freebsd-x86_64, path: "tufan-*.tar.gz" }
+        with:
+          name: freebsd-x86_64
+          path: |
+            tufan-*.tar.gz
 
   publish:
     needs: [linux, macos, windows, freebsd]
