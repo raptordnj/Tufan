@@ -303,6 +303,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "gdk4-win32"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc22bb56e61bb3c8a18d3fb565f58a497caf01fdc05e7f0cf7993f85dedb8c9b"
+dependencies = [
+ "cairo-rs",
+ "gdk4",
+ "gdk4-win32-sys",
+ "gio",
+ "glib",
+ "libc",
+]
+
+[[package]]
+name = "gdk4-win32-sys"
+version = "0.11.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd81f5145c5203b3852c4b02af462322b19311772f7d84f68084b18df055789c"
+dependencies = [
+ "cairo-sys-rs",
+ "gdk4-sys",
+ "glib-sys",
+ "libc",
+ "system-deps",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -956,14 +983,14 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tufan-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tufan-core",
 ]
 
 [[package]]
 name = "tufan-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "junction",
  "libc",
@@ -976,9 +1003,10 @@ dependencies = [
 
 [[package]]
 name = "tufan-gtk"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "embed-resource",
+ "gdk4-win32",
  "gtk4",
  "tufan-core",
  "windows",

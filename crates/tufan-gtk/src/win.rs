@@ -20,7 +20,7 @@ use gtk4::glib;
 use tufan_core::JobKind;
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::HBRUSH;
+use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HBRUSH, MONITOR_DEFAULTTONULL};
 use windows::Win32::System::Com::*;
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -640,5 +640,75 @@ fn replay_ctrl_v() {
     }
     unsafe {
         SendInput(&seq, std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+// --- Compact progress windows ---------------------------------------------------
+
+fn hwnd_of(w: &gtk4::Window) -> Option<HWND> {
+    use gtk4::prelude::*;
+    let surface = w.surface()?;
+    let surface = surface.downcast_ref::<gdk4_win32::Win32Surface>()?;
+    let h = HWND(surface.handle().0);
+    (!h.is_invalid()).then_some(h)
+}
+
+/// Keeps a window above all others (GTK 4 has no API for this).
+pub fn set_topmost(w: &gtk4::Window, on: bool) {
+    let Some(h) = hwnd_of(w) else { return };
+    let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    unsafe {
+        let _ = SetWindowPos(
+            h,
+            Some(after),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Remembers where the user left a progress window.
+pub fn save_position(w: &gtk4::Window) {
+    let Some(h) = hwnd_of(w) else { return };
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(h, &mut r) }.is_ok() {
+        set_dword(w!("CompactX"), r.left as u32);
+        set_dword(w!("CompactY"), r.top as u32);
+    }
+}
+
+/// Moves a progress window to the remembered position, shifted by
+/// `offset` pixels so windows of concurrent jobs do not cover each other.
+/// A position that is no longer on any monitor is ignored.
+pub fn restore_position(w: &gtk4::Window, offset: i32) {
+    let (Some(x), Some(y), Some(h)) = (
+        get_dword(w!("CompactX")),
+        get_dword(w!("CompactY")),
+        hwnd_of(w),
+    ) else {
+        return;
+    };
+    let (x, y) = (x as i32 + offset, y as i32 + offset);
+    // The title bar must land on a monitor so the window can be dragged.
+    let probe = POINT {
+        x: x + 40,
+        y: y + 16,
+    };
+    if unsafe { MonitorFromPoint(probe, MONITOR_DEFAULTTONULL) }.is_invalid() {
+        return;
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            h,
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
 }

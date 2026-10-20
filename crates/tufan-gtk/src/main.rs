@@ -869,6 +869,23 @@ fn compact_window(state: &Shared, ui: &Ui, idx: usize, spec: &JobSpec) -> Compac
         let state = state.clone();
         cancel.connect_clicked(move |_| cancel_job(&state, idx));
     }
+    // On top while the transfer runs, at the place the user last left a
+    // progress window (GTK 4 offers neither, so Windows only).
+    #[cfg(windows)]
+    {
+        let offset = 32 * open_compacts(state) as i32;
+        win.connect_map(move |w| {
+            let w = w.clone();
+            glib::idle_add_local_once(move || {
+                win::restore_position(&w, offset);
+                win::set_topmost(&w, true);
+            });
+        });
+        win.connect_close_request(|w| {
+            win::save_position(w);
+            glib::Propagation::Proceed
+        });
+    }
     win.present();
     Compact {
         win,
@@ -879,6 +896,17 @@ fn compact_window(state: &Shared, ui: &Ui, idx: usize, spec: &JobSpec) -> Compac
         pause,
         cancel,
     }
+}
+
+/// Progress windows currently on screen, for cascading new ones.
+#[cfg(windows)]
+fn open_compacts(state: &Shared) -> usize {
+    state
+        .borrow()
+        .jobs
+        .iter()
+        .filter(|r| r.compact.as_ref().is_some_and(|c| c.win.is_visible()))
+        .count()
 }
 
 // --- Job log ------------------------------------------------------------------
@@ -1258,6 +1286,11 @@ fn tick(state: &Shared, summary: &gtk4::Label) {
             if let Some(c) = &row.compact {
                 c.pause.set_visible(false);
                 c.cancel.set_visible(false);
+                #[cfg(windows)]
+                {
+                    win::set_topmost(&c.win, false);
+                    win::save_position(&c.win);
+                }
                 // A clean finish needs no attention: close shortly after.
                 if state_now == JobState::Completed && s.files_failed == 0 {
                     let w = c.win.clone();

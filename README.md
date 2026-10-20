@@ -117,7 +117,9 @@ Nothing is officially supported yet.
 - Runs in the system tray. Closing the window hides it there (the tray menu
   can turn this off); Exit pauses running jobs, which resume next time.
 - Each transfer opens a small progress window with speed, time left, file
-  and byte counts, Pause, Cancel, Log and Details.
+  and byte counts, Pause, Cancel, Log and Details. It stays on top while
+  the transfer runs, drops back when it finishes, and opens where it was
+  last left (stored in `HKCU\Software\Tufan`).
 - Optional Explorer paste takeover (installer option, or the tray menu):
   with files copied or cut in Explorer, Ctrl+V in an Explorer folder runs
   the copy or move through Tufan. Only the file view of an Explorer window
