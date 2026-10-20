@@ -25,13 +25,29 @@ Windows. Set `TUFAN_HOME` or pass `--journal` to put it somewhere else.
 
 ## Guarantees (and their limits)
 
-- **Publication.** Each file is written to `.<name>.tufan-<job>.part` in the
-  destination folder, then renamed into place. An existing destination is
-  never truncated. With `overwrite` it is replaced atomically by rename;
-  otherwise Tufan uses a rename that refuses to replace
-  (`renameat2(RENAME_NOREPLACE)` on Linux, a hard-link trick elsewhere).
-  On filesystems without hard links (FAT/exFAT, some shares) the
+- **Publication.** Each file is written to `.tufan-<job>-<id>.part` in the
+  destination folder (the id comes from the source path, so names that
+  differ only in case never share a temp file), then renamed into place.
+  An existing destination is never truncated. With `overwrite` it is
+  replaced atomically by rename; otherwise Tufan uses a rename that refuses
+  to replace (`renameat2(RENAME_NOREPLACE)` on Linux, `MoveFileExW` without
+  replace on Windows, a hard-link trick elsewhere). On filesystems without
+  hard links (FAT/exFAT, some shares) outside Linux and Windows the
   no-replace check has a small race window.
+- **No avoidable failures.** A destination that already holds exactly the
+  source content counts as done, not as a conflict (byte comparison;
+  size and mtime in Fast mode). This applies to `fail` and `skip`, and to
+  resumed jobs, whose last journal batch may have been lost in a crash.
+  Files that changed once after the scan are retried against their current
+  state. Locked files (sharing violations, antivirus holding a new file,
+  error 5/32/33/1224 on Windows) are retried with backoff. Read-only files
+  are copied, replaced and moved. A failed journal batch is kept and
+  retried instead of being dropped.
+- **What can still fail.** A file Tufan may not read, a destination it may
+  not write, a full disk, or a file that keeps changing or stays locked
+  for the whole retry window. These are reported per file with the reason
+  (the GUI's job log filters by Success, Skipped, Failed and Errors), and
+  `resume` retries them.
 - **Integrity modes.**
   - *fast*: checks size and that the source didn't change (size, mtime,
     inode). It does **not** check content.
@@ -57,7 +73,14 @@ Windows. Set `TUFAN_HOME` or pass `--journal` to put it somewhere else.
   256 rows / 250 ms. The tree is never loaded into memory. (For moves, the
   list of source *directories* is kept so empty ones can be removed.)
 - **Links.** Symlinks are never followed. They are recreated (default) or
-  skipped. Hard links are copied as independent files.
+  skipped. An absolute target inside a copied source is pointed at the
+  copy, so copies are self-contained and moves leave no dangling links.
+  On Windows, junctions are recreated as junctions; directory symlinks fall
+  back to junctions, and file symlinks to copying the file, when the account
+  lacks the symlink privilege. Hard links are copied as independent files.
+- **Same file.** Copying or moving a file onto itself (including through a
+  junction, mapped drive or other spelling) is refused, except a copy with
+  `rename` ("keep both").
 - **Metadata.** Permissions and timestamps are preserved. Ownership, ACLs,
   xattrs, ADS and sparse layout are **not** preserved yet. Read-only
   directory modes are not applied to the destination.
@@ -88,3 +111,18 @@ resumable. Re-run on your own storage before drawing conclusions.
 | Windows / macOS / FreeBSD / other arches | CI config only | NSIS script compiles with stub binaries | no |
 
 Nothing is officially supported yet.
+
+## Windows integration (GTK app)
+
+- Runs in the system tray. Closing the window hides it there (the tray menu
+  can turn this off); Exit pauses running jobs, which resume next time.
+- Each transfer opens a small progress window with speed, time left, file
+  and byte counts, Pause, Cancel, Log and Details.
+- Optional Explorer paste takeover (installer option, or the tray menu):
+  with files copied or cut in Explorer, Ctrl+V in an Explorer folder runs
+  the copy or move through Tufan. Only the file view of an Explorer window
+  is affected: rename boxes, the address bar, the desktop, file dialogs and
+  virtual folders (This PC, libraries, zip folders) keep the normal paste.
+  It uses a low-level keyboard hook in Tufan's own process; nothing is
+  loaded into Explorer. Turning it on also starts Tufan at login.
+- In the Tufan window, Ctrl+V and drag-and-drop add files as sources.

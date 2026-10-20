@@ -107,7 +107,8 @@ jobs:
           update: true
           install: >-
             mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-gtk4
-            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-nsis zip
+            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-nsis
+            mingw-w64-ucrt-x86_64-binutils zip
       - run: cargo test --release -p tufan-core
       - run: cargo build --release --workspace
       - name: Bundle GTK runtime

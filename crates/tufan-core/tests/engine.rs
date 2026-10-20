@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tufan_core::faults::{self, Stage};
-use tufan_core::integrity;
-use tufan_core::journal::Journal;
+use tufan_core::journal::{self, ItemState, Journal};
+use tufan_core::{filesystem, integrity};
 use tufan_core::{start, ConflictPolicy, IntegrityMode, JobKind, JobSpec, JobState, Options};
 
 // Fault injection is process-global; serialise every test.
@@ -194,6 +194,86 @@ fn conflict_policies() {
     assert_eq!(fs::read(dst.join("f (1).txt")).unwrap(), b"new");
     assert_eq!(run(ConflictPolicy::Overwrite), JobState::Completed);
     assert_eq!(fs::read(dst.join("f.txt")).unwrap(), b"new");
+}
+
+#[test]
+fn journal_items_log_each_outcome() {
+    let _g = serial();
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("s");
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("new.txt"), b"new").unwrap();
+    fs::write(src.join("clash.txt"), b"new").unwrap();
+    let dst = t.path().join("d");
+    fs::create_dir_all(dst.join("s")).unwrap();
+    fs::write(dst.join("s/clash.txt"), b"old").unwrap();
+    let j = journal(t.path());
+    let h = start(
+        j.clone(),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
+    assert_eq!(h.wait(), JobState::PartiallyCompleted);
+    let items = j.items(h.id()).unwrap();
+    let find = |name: &str| {
+        items
+            .iter()
+            .find(|r| journal::key_path(&r.key).unwrap().ends_with(name))
+            .unwrap()
+    };
+    assert_eq!(find("new.txt").state, ItemState::Done);
+    let clash = find("clash.txt");
+    assert_eq!(clash.state, ItemState::Failed);
+    assert!(clash.error.as_deref().unwrap().contains("already exists"));
+}
+
+/// A crash can publish files before their journal batch is committed. On
+/// resume those destinations already hold exactly the source content and
+/// must count as done, not as conflicts. Simulated with a fresh journal.
+#[test]
+fn identical_destination_is_not_a_conflict() {
+    let _g = serial();
+    let t = tempfile::tempdir().unwrap();
+    let (src, dst) = (t.path().join("src"), t.path().join("dst"));
+    make_tree(&src);
+    fs::create_dir(&dst).unwrap();
+    let run = |kind, sources: Vec<PathBuf>, journal_name: &str| {
+        let j = Arc::new(Journal::open(&t.path().join(journal_name)).unwrap());
+        let h = start(
+            j,
+            spec(
+                kind,
+                sources,
+                &dst,
+                opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+            ),
+        )
+        .unwrap();
+        (h.wait(), h.report())
+    };
+    let (st, rep) = run(JobKind::Copy, vec![src.clone()], "a.sqlite3");
+    assert_eq!(st, JobState::Completed, "{rep:?}");
+    let (st, rep) = run(JobKind::Copy, vec![src.clone()], "b.sqlite3");
+    assert_eq!(st, JobState::Completed, "{rep:?}");
+    assert_trees_equal(&src, &dst.join("src"));
+
+    // Different content is still a conflict under the Fail policy.
+    fs::write(dst.join("src/.hidden"), b"changed").unwrap();
+    let (st, _) = run(JobKind::Copy, vec![src.clone()], "c.sqlite3");
+    assert_eq!(st, JobState::PartiallyCompleted);
+    assert_eq!(fs::read(dst.join("src/.hidden")).unwrap(), b"changed");
+
+    // A move onto an identical copy completes by removing the source.
+    fs::write(dst.join("src/.hidden"), b"h").unwrap();
+    let (st, rep) = run(JobKind::Move, vec![src.clone()], "d.sqlite3");
+    assert_eq!(st, JobState::Completed, "{rep:?}");
+    assert!(!src.join("a/small7").exists());
+    assert!(dst.join("src/a/small7").exists());
 }
 
 #[test]
@@ -472,7 +552,7 @@ fn large_file_resume_from_checkpoint() {
     faults::arm(Stage::Write, 1);
     assert_eq!(h.wait(), JobState::Failed);
     faults::clear();
-    let temp = dst.join(format!(".big.tufan-{}.part", h.id()));
+    let temp = filesystem::temp_path(&dst.join("big"), h.id(), &journal::path_key(&src));
     assert!(temp.exists(), "checkpointed temp kept for resume");
     let h2 = tufan_core::resume(j, h.id()).unwrap();
     assert_eq!(h2.wait(), JobState::Completed);
@@ -507,7 +587,7 @@ fn corrupt_checkpoint_restarts_file() {
     faults::arm(Stage::Write, 1);
     assert_eq!(h.wait(), JobState::Failed);
     faults::clear();
-    let temp = dst.join(format!(".big.tufan-{}.part", h.id()));
+    let temp = filesystem::temp_path(&dst.join("big"), h.id(), &journal::path_key(&src));
     // Corrupt the checkpointed prefix.
     let mut data = fs::read(&temp).unwrap();
     data[10] ^= 0xff;
@@ -573,4 +653,171 @@ fn invalid_journal_rows_are_rejected() {
 
 fn rusqlite_conn(p: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open(p).unwrap()
+}
+
+#[test]
+fn copy_in_place_keeps_both() {
+    let _g = serial();
+    let t = tempfile::tempdir().unwrap();
+    let f = t.path().join("f.txt");
+    fs::write(&f, b"data").unwrap();
+    let run = |c| {
+        start(
+            journal(t.path()),
+            spec(
+                JobKind::Copy,
+                vec![f.clone()],
+                t.path(),
+                opts(IntegrityMode::Verified, c),
+            ),
+        )
+        .unwrap()
+        .wait()
+    };
+    // Never replaces a file with itself.
+    assert_eq!(run(ConflictPolicy::Overwrite), JobState::Failed);
+    assert_eq!(run(ConflictPolicy::Rename), JobState::Completed);
+    assert_eq!(fs::read(t.path().join("f (1).txt")).unwrap(), b"data");
+    assert_eq!(fs::read(&f).unwrap(), b"data");
+}
+
+#[test]
+fn temp_names_differ_for_case_variants() {
+    let d = Path::new("dir");
+    let a = filesystem::temp_path(&d.join("Readme.md"), 1, b"/s/Readme.md");
+    let b = filesystem::temp_path(&d.join("README.md"), 1, b"/s/README.md");
+    assert_ne!(
+        a.to_string_lossy().to_lowercase(),
+        b.to_string_lossy().to_lowercase()
+    );
+    assert!(filesystem::is_temp_for_job(
+        &a.file_name().unwrap().to_string_lossy(),
+        1
+    ));
+}
+
+#[test]
+fn read_only_files_copy_overwrite_and_move() {
+    let _g = serial();
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("s");
+    fs::create_dir(&src).unwrap();
+    let ro = |p: &Path| {
+        let mut perm = fs::metadata(p).unwrap().permissions();
+        perm.set_readonly(true);
+        fs::set_permissions(p, perm).unwrap();
+    };
+    fs::write(src.join("pack.idx"), b"objects").unwrap();
+    ro(&src.join("pack.idx"));
+    let dst = t.path().join("d");
+    fs::create_dir(&dst).unwrap();
+    let run = |kind, c| {
+        let h = start(
+            journal(t.path()),
+            spec(
+                kind,
+                vec![src.clone()],
+                &dst,
+                opts(IntegrityMode::Verified, c),
+            ),
+        )
+        .unwrap();
+        (h.wait(), h.report())
+    };
+    let (st, rep) = run(JobKind::Copy, ConflictPolicy::Fail);
+    assert_eq!(st, JobState::Completed, "{rep:?}");
+    assert!(fs::metadata(dst.join("s/pack.idx"))
+        .unwrap()
+        .permissions()
+        .readonly());
+    // Replace the read-only copy with different content.
+    let mut perm = fs::metadata(src.join("pack.idx")).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perm.set_readonly(false);
+    fs::set_permissions(src.join("pack.idx"), perm).unwrap();
+    fs::write(src.join("pack.idx"), b"objects v2").unwrap();
+    ro(&src.join("pack.idx"));
+    let (st, rep) = run(JobKind::Copy, ConflictPolicy::Overwrite);
+    assert_eq!(st, JobState::Completed, "{rep:?}");
+    assert_eq!(fs::read(dst.join("s/pack.idx")).unwrap(), b"objects v2");
+    // Moving onto the identical read-only copy removes the read-only source.
+    let (st, rep) = run(JobKind::Move, ConflictPolicy::Fail);
+    assert_eq!(st, JobState::Completed, "{rep:?}");
+    assert!(!src.join("pack.idx").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn absolute_links_inside_the_tree_point_at_the_copy() {
+    let _g = serial();
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("proj");
+    fs::create_dir_all(src.join("storage/public")).unwrap();
+    fs::write(src.join("storage/public/a.txt"), b"a").unwrap();
+    std::os::unix::fs::symlink(src.join("storage/public"), src.join("public_storage")).unwrap();
+    std::os::unix::fs::symlink("/etc/hostname", src.join("outside")).unwrap();
+    let dst = t.path().join("d");
+    fs::create_dir(&dst).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
+    assert_eq!(h.wait(), JobState::Completed, "{:?}", h.report());
+    assert_eq!(
+        fs::read_link(dst.join("proj/public_storage")).unwrap(),
+        dst.join("proj/storage/public")
+    );
+    // Targets outside the copied tree are kept as they are.
+    assert_eq!(
+        fs::read_link(dst.join("proj/outside")).unwrap(),
+        Path::new("/etc/hostname")
+    );
+}
+
+/// Junctions (e.g. Laravel's `public/storage`, npm workspaces) and directory
+/// symlinks are recreated as links into the copy, never as broken links.
+#[cfg(windows)]
+#[test]
+fn windows_junctions_and_dir_links_are_recreated() {
+    let _g = serial();
+    let t = tempfile::tempdir().unwrap();
+    let src = t.path().join("proj");
+    fs::create_dir_all(src.join("storage/app/public")).unwrap();
+    fs::write(src.join("storage/app/public/a.txt"), b"a").unwrap();
+    fs::create_dir(src.join("public")).unwrap();
+    junction::create(src.join("storage/app/public"), src.join("public/storage")).unwrap();
+    let dir_link = std::os::windows::fs::symlink_dir("storage", src.join("rel")).is_ok();
+    let dst = t.path().join("d");
+    fs::create_dir(&dst).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Move,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
+    // Cross-check through a fresh move: links must survive source removal.
+    assert_eq!(h.wait(), JobState::Completed, "{:?}", h.report());
+    let j = dst.join("proj/public/storage");
+    assert!(junction::exists(&j).unwrap());
+    assert_eq!(
+        filesystem::strip_verbatim(&junction::get_target(&j).unwrap()),
+        dst.join("proj/storage/app/public")
+    );
+    assert_eq!(fs::read(j.join("a.txt")).unwrap(), b"a");
+    if dir_link {
+        assert_eq!(
+            fs::read(dst.join("proj/rel/app/public/a.txt")).unwrap(),
+            b"a"
+        );
+    }
 }

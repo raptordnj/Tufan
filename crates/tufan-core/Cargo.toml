@@ -6,10 +6,15 @@ license.workspace = true
 
 [dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }
+same-file = "1.0.6"
 sha2 = "0.11"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target."cfg(windows)".dependencies]
+junction = "2.1.0"
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled"] }

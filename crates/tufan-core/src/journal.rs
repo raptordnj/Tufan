@@ -124,6 +124,11 @@ pub fn path_key(p: &Path) -> Vec<u8> {
     p.as_os_str().as_encoded_bytes().to_vec()
 }
 
+/// Inverse of [`path_key`]; `None` for keys that are not a valid path here.
+pub fn key_path(key: &[u8]) -> Option<PathBuf> {
+    path_from_bytes(key)
+}
+
 fn path_from_bytes(b: &[u8]) -> Option<PathBuf> {
     #[cfg(unix)]
     {
@@ -332,7 +337,50 @@ impl Journal {
         Ok(n as u64)
     }
 
-    /// Batched update.
+    /// Every item recorded for a job, in source-path order, for the job log.
+    pub fn items(&self, job: i64) -> Result<Vec<ItemRecord>> {
+        let mut g = self.inner.lock().unwrap();
+        flush_locked(&mut g)?;
+        let mut st = g.conn.prepare(
+            "SELECT key, state, dest, size, src_id, offset, prefix_hash, error
+             FROM items WHERE job_id = ?1 ORDER BY key",
+        )?;
+        let rows = st.query_map(params![job], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<Vec<u8>>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Option<Vec<u8>>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (key, state, dest, size, src_id, offset, prefix_hash, error) = r?;
+            // Skip invalid rows instead of failing the whole listing.
+            let Some(state) = ItemState::from_i64(state) else {
+                continue;
+            };
+            out.push(ItemRecord {
+                key,
+                state,
+                dest: dest.as_deref().and_then(path_from_bytes),
+                size: size.max(0) as u64,
+                src_id,
+                offset: offset.max(0) as u64,
+                prefix_hash,
+                error,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Batched update. A failed batch write is kept and retried by the
+    /// next flush rather than failing the item that happened to trigger it;
+    /// `flush` at the end of a job reports a journal that stays unwritable.
     pub fn put(&self, job: i64, rec: ItemRecord) -> Result<()> {
         let mut g = self.inner.lock().unwrap();
         g.pending.push((job, rec));
@@ -340,7 +388,7 @@ impl Journal {
         let due =
             g.pending.len() >= BATCH_ROWS || g.oldest.is_some_and(|t| t.elapsed() >= BATCH_AGE);
         if due {
-            flush_locked(&mut g)?;
+            let _ = flush_locked(&mut g);
         }
         Ok(())
     }
@@ -363,13 +411,25 @@ fn flush_locked(g: &mut Inner) -> Result<()> {
     }
     let pending = std::mem::take(&mut g.pending);
     g.oldest = None;
-    let tx = g.conn.transaction()?;
+    if let Err(e) = write_items(&mut g.conn, &pending) {
+        // Keep the rows: dropping them would lose finished work, and the
+        // next flush retries.
+        let newer = std::mem::replace(&mut g.pending, pending);
+        g.pending.extend(newer);
+        g.oldest = Some(Instant::now());
+        return Err(e);
+    }
+    Ok(())
+}
+
+fn write_items(conn: &mut Connection, pending: &[(i64, ItemRecord)]) -> Result<()> {
+    let tx = conn.transaction()?;
     {
         let mut st = tx.prepare_cached(
             "INSERT OR REPLACE INTO items(job_id, key, state, dest, size, src_id, offset, prefix_hash, error)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
-        for (job, r) in &pending {
+        for (job, r) in pending {
             st.execute(params![
                 job,
                 r.key,

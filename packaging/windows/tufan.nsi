@@ -1,11 +1,11 @@
 ; Tufan NSIS installer.
-; Build: makensis -DVERSION=0.1.0 -DARCH=x86_64 -DBINDIR=<dir with tufan.exe, tufan-gtk.exe, GTK DLLs> tufan.nsi
+; Build: makensis -DVERSION=0.2.0 -DARCH=x86_64 -DBINDIR=<dir with tufan.exe, tufan-gtk.exe, GTK DLLs> tufan.nsi
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.1.0"
+  !define VERSION "0.2.0"
 !endif
 !ifndef ARCH
   !define ARCH "x86_64"
@@ -27,18 +27,31 @@ VIAddVersionKey "FileDescription" "Tufan installer"
 VIAddVersionKey "LegalCopyright" "Tufan developers"
 
 !define MUI_ABORTWARNING
+!define MUI_ICON "tufan.ico"
+!define MUI_UNICON "tufan.ico"
+!define MUI_FINISHPAGE_RUN "$INSTDIR\tufan-gtk.exe"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch Tufan"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
 Function .onInit
   ; Refuse to upgrade over a running instance (jobs could be active).
-  FindWindow $0 "" "Tufan"
+  ; The tray window class exists while Tufan runs, even when hidden.
+  FindWindow $0 "TufanTray"
   StrCmp $0 0 +3
-    MessageBox MB_OK|MB_ICONEXCLAMATION "Tufan is running. Close it (and let active jobs finish) before installing."
+    MessageBox MB_OK|MB_ICONEXCLAMATION "Tufan is running. Let active jobs finish, then choose Exit from its tray icon before installing."
+    Abort
+FunctionEnd
+
+Function un.onInit
+  FindWindow $0 "TufanTray"
+  StrCmp $0 0 +3
+    MessageBox MB_OK|MB_ICONEXCLAMATION "Tufan is running. Choose Exit from its tray icon, then uninstall."
     Abort
 FunctionEnd
 
@@ -60,9 +73,17 @@ Section /o "Desktop shortcut" SecDesktop
   CreateShortcut "$DESKTOP\Tufan.lnk" "$INSTDIR\tufan-gtk.exe"
 SectionEnd
 
+; Takes over Ctrl+V / Ctrl+X paste in Explorer; also starts Tufan hidden
+; in the tray at login, since the takeover only works while it runs.
+; Both can be switched off later from the tray menu.
+Section "Use Tufan for Explorer copy/paste (starts with Windows)" SecExplorer
+  WriteRegDWORD HKCU "Software\Tufan" "ExplorerPaste" 1
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Tufan" '"$INSTDIR\tufan-gtk.exe" --background'
+SectionEnd
+
 ; Off by default: never enable startup behaviour silently.
 Section /o "Start Tufan at login" SecStartup
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Tufan" '"$INSTDIR\tufan-gtk.exe"'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Tufan" '"$INSTDIR\tufan-gtk.exe" --background'
 SectionEnd
 
 Section "Uninstall"

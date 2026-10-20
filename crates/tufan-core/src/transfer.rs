@@ -114,7 +114,7 @@ pub fn copy_file(
         },
     };
 
-    let temp = fsx::temp_path(&dest, ctx.job_id);
+    let temp = fsx::temp_path(&dest, ctx.job_id, key);
     let mut checkpointed = false;
     let mut added = 0u64;
     let r = write_and_publish(
@@ -268,6 +268,8 @@ fn write_and_publish(
 
     faults::hit(Stage::Publish).map_err(|e| Error::io(dest, e))?;
     if replace {
+        // Windows will not replace a read-only file.
+        fsx::make_writable(dest).map_err(|e| Error::io(dest, e))?;
         fs::rename(temp, dest).map_err(|e| Error::io(dest, e))?;
     } else {
         match fsx::rename_noreplace(temp, dest) {

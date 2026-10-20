@@ -1,29 +1,49 @@
 //! Tufan desktop UI (GTK 4). All filesystem work runs in the engine's
 //! threads; the UI polls aggregated progress snapshots at 4 Hz.
 
-use std::cell::RefCell;
-use std::path::PathBuf;
+// No console window alongside the UI on Windows.
+#![windows_subsystem = "windows"]
+
+#[cfg(windows)]
+mod win;
+
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gtk4::prelude::*;
 use gtk4::{gdk, gio, glib};
-use tufan_core::journal::{self, Journal};
+use tufan_core::journal::{self, ItemState, Journal};
 use tufan_core::{ConflictPolicy, IntegrityMode, JobHandle, JobKind, JobSpec, JobState, Options};
 
 const APP_ID: &str = "org.tufan.Tufan";
 
+// No `window { background: ... }` rule: GTK 4.20 dropped the named theme
+// colours, and an unresolved one there leaves every window see-through.
 const CSS: &str = "
-window { background: @window_bg_color; }
 .brand { font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
 .muted { opacity: 0.65; }
 .job { padding: 10px 12px; border-bottom: 1px solid alpha(currentColor, 0.08); }
 .job-title { font-weight: 600; }
 .summary { padding: 6px 12px; }
+.log { font-family: monospace; padding: 1px 8px; }
 progressbar trough { min-height: 6px; border-radius: 3px; }
 progressbar progress { min-height: 6px; border-radius: 3px; }
 ";
+
+/// Small per-job progress window shown while a transfer runs.
+struct Compact {
+    win: gtk4::Window,
+    title: String,
+    bar: gtk4::ProgressBar,
+    rate: gtk4::Label,
+    counts: gtk4::Label,
+    pause: gtk4::Button,
+    cancel: gtk4::Button,
+}
 
 struct JobRow {
     handle: Option<Arc<JobHandle>>,
@@ -35,6 +55,9 @@ struct JobRow {
     pause: gtk4::Button,
     cancel: gtk4::Button,
     retry: gtk4::Button,
+    compact: Option<Compact>,
+    /// The finished state has been shown (once per run of the job).
+    finish_seen: bool,
     last: (Instant, u64),
     speed: f64,
 }
@@ -44,19 +67,57 @@ struct App {
     sources: Vec<PathBuf>,
     dest: Option<PathBuf>,
     jobs: Vec<JobRow>,
+    tray_status: String,
 }
 
 type Shared = Rc<RefCell<App>>;
 
-fn main() -> glib::ExitCode {
-    let app = gtk4::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(activate);
-    app.run()
+/// Widgets that job handling needs outside `activate`.
+#[derive(Clone)]
+struct Ui {
+    app: gtk4::Application,
+    window: gtk4::ApplicationWindow,
+    jobs_box: gtk4::Box,
+    integrity: gtk4::DropDown,
+    conflict: gtk4::DropDown,
 }
 
-fn activate(app: &gtk4::Application) {
+fn main() -> glib::ExitCode {
+    // --background (used by the login entry) starts hidden in the tray.
+    let mut args: Vec<String> = std::env::args().collect();
+    let background = args.iter().any(|a| a == "--background");
+    args.retain(|a| a != "--background");
+    // GApplication uniqueness needs D-Bus, which Windows lacks.
+    #[cfg(windows)]
+    if !win::claim_single_instance() {
+        return glib::ExitCode::SUCCESS;
+    }
+    let app = gtk4::Application::builder().application_id(APP_ID).build();
+    let first = Cell::new(true);
+    app.connect_activate(move |app| activate(app, background && first.replace(false)));
+    app.run_with_args(&args)
+}
+
+/// GTK 4.20 deprecates gtk-application-prefer-dark-theme in favour of
+/// gtk-interface-color-scheme; use the new property when the runtime has it.
+fn set_dark(s: &gtk4::Settings, dark: bool) {
+    let scheme = s
+        .find_property("gtk-interface-color-scheme")
+        .and_then(|p| glib::EnumClass::with_type(p.value_type()))
+        .and_then(|c| c.to_value_by_nick(if dark { "dark" } else { "default" }));
+    match scheme {
+        Some(v) => s.set_property_from_value("gtk-interface-color-scheme", &v),
+        None => s.set_gtk_application_prefer_dark_theme(dark),
+    }
+}
+
+fn activate(app: &gtk4::Application, background: bool) {
     // Single instance: a second launch re-presents the existing window.
-    if let Some(w) = app.active_window() {
+    if let Some(w) = app
+        .windows()
+        .into_iter()
+        .find(|w| w.is::<gtk4::ApplicationWindow>())
+    {
         w.present();
         return;
     }
@@ -80,6 +141,7 @@ fn activate(app: &gtk4::Application) {
         sources: Vec::new(),
         dest: None,
         jobs: Vec::new(),
+        tray_status: String::new(),
     }));
 
     let window = gtk4::ApplicationWindow::builder()
@@ -105,7 +167,7 @@ fn activate(app: &gtk4::Application) {
     theme.set_tooltip_text(Some("Toggle dark theme"));
     theme.connect_toggled(|b| {
         if let Some(s) = gtk4::Settings::default() {
-            s.set_gtk_application_prefer_dark_theme(b.is_active());
+            set_dark(&s, b.is_active());
         }
     });
     brand_row.append(&brand);
@@ -121,7 +183,9 @@ fn activate(app: &gtk4::Application) {
     let add_files = gtk4::Button::with_label("Add Files…");
     let add_folder = gtk4::Button::with_label("Add Folder…");
     let paste = gtk4::Button::with_label("From Clipboard");
-    paste.set_tooltip_text(Some("Import files copied in the file manager"));
+    paste.set_tooltip_text(Some(
+        "Import files copied in the file manager (Ctrl+V). You can also drop files here.",
+    ));
     let clear = gtk4::Button::with_label("Clear");
     let src_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     for w in [&add_files, &add_folder, &paste, &clear] {
@@ -183,6 +247,14 @@ fn activate(app: &gtk4::Application) {
 
     window.set_child(Some(&root));
 
+    let ui = Ui {
+        app: app.clone(),
+        window: window.clone(),
+        jobs_box: jobs_box.clone(),
+        integrity: integrity.clone(),
+        conflict: conflict.clone(),
+    };
+
     // --- Behaviour -------------------------------------------------------
     let refresh_src = {
         let (state, label) = (state.clone(), src_label.clone());
@@ -240,19 +312,40 @@ fn activate(app: &gtk4::Application) {
                     .await
                 {
                     if let Ok(list) = v.get::<gdk::FileList>() {
-                        let mut st = state.borrow_mut();
-                        for f in list.files() {
-                            if let Some(p) = f.path() {
-                                if !st.sources.contains(&p) {
-                                    st.sources.push(p);
-                                }
-                            }
-                        }
+                        add_files_list(&state, &list);
                     }
                 }
                 refresh();
             });
         });
+    }
+    // Ctrl+V in the window imports the clipboard like the button does.
+    {
+        let paste = paste.clone();
+        let keys = gtk4::ShortcutController::new();
+        keys.set_scope(gtk4::ShortcutScope::Managed);
+        keys.add_shortcut(gtk4::Shortcut::new(
+            gtk4::ShortcutTrigger::parse_string("<Control>v"),
+            Some(gtk4::CallbackAction::new(move |_, _| {
+                paste.emit_clicked();
+                glib::Propagation::Stop
+            })),
+        ));
+        window.add_controller(keys);
+    }
+    // Files dropped from the file manager become sources.
+    {
+        let (state, refresh) = (state.clone(), refresh_src.clone());
+        let drop = gtk4::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        drop.connect_drop(move |_, v, _, _| {
+            let Ok(list) = v.get::<gdk::FileList>() else {
+                return false;
+            };
+            add_files_list(&state, &list);
+            refresh();
+            true
+        });
+        window.add_controller(drop);
     }
     {
         let (state, refresh) = (state.clone(), refresh_src.clone());
@@ -281,56 +374,32 @@ fn activate(app: &gtk4::Application) {
     }
 
     for (btn, kind) in [(&copy_btn, JobKind::Copy), (&move_btn, JobKind::Move)] {
-        let (state, jobs_box, integrity, conflict, win, refresh) = (
-            state.clone(),
-            jobs_box.clone(),
-            integrity.clone(),
-            conflict.clone(),
-            window.clone(),
-            refresh_src.clone(),
-        );
+        let (state, ui, refresh) = (state.clone(), ui.clone(), refresh_src.clone());
         btn.connect_clicked(move |_| {
-            let (sources, dest, journal) = {
+            let (sources, dest) = {
                 let st = state.borrow();
-                (st.sources.clone(), st.dest.clone(), st.journal.clone())
+                (st.sources.clone(), st.dest.clone())
             };
             let Some(dest) = dest else {
-                alert(&win, "Choose a destination folder first.");
+                alert(&ui.window, "Choose a destination folder first.");
                 return;
             };
             if sources.is_empty() {
-                alert(&win, "Add at least one file or folder to transfer.");
+                alert(&ui.window, "Add at least one file or folder to transfer.");
                 return;
             }
-            let options = Options {
-                integrity: [
-                    IntegrityMode::Verified,
-                    IntegrityMode::DurableVerified,
-                    IntegrityMode::Fast,
-                ][integrity.selected() as usize % 3],
-                conflict: [
-                    ConflictPolicy::Fail,
-                    ConflictPolicy::Skip,
-                    ConflictPolicy::Rename,
-                    ConflictPolicy::Overwrite,
-                ][conflict.selected() as usize % 4],
-                ..Options::default()
-            };
-            match tufan_core::start(
-                journal,
-                JobSpec {
-                    kind,
-                    sources,
-                    dest_dir: dest,
-                    options,
-                },
-            ) {
-                Ok(h) => {
-                    add_job_row(&state, &jobs_box, Some(Arc::new(h)), None);
+            match start_job(&state, &ui, kind, sources, dest) {
+                Ok(()) => {
                     state.borrow_mut().sources.clear();
                     refresh();
+                    // The compact window takes over; the main window waits
+                    // in the tray.
+                    #[cfg(windows)]
+                    if win::close_to_tray() {
+                        ui.window.set_visible(false);
+                    }
                 }
-                Err(e) => alert(&win, &e.to_string()),
+                Err(e) => alert(&ui.window, &e),
             }
         });
     }
@@ -346,7 +415,7 @@ fn activate(app: &gtk4::Application) {
         .filter(|j| !j.state.is_finished())
         .collect();
     for j in unfinished {
-        add_job_row(&state, &jobs_box, None, Some(j));
+        add_job_row(&state, &ui, None, Some(j));
     }
 
     {
@@ -357,41 +426,173 @@ fn activate(app: &gtk4::Application) {
         });
     }
 
-    // Keep running while jobs are active even if the window is closed.
+    #[cfg(windows)]
     {
-        let state = state.clone();
-        let app = app.clone();
-        window.connect_close_request(move |w| {
-            let active = state
-                .borrow()
-                .jobs
-                .iter()
-                .any(|r| r.handle.as_ref().is_some_and(|h| !h.is_finished()));
-            if active {
-                w.set_visible(false);
-                let guard = app.hold();
-                let state = state.clone();
-                glib::timeout_add_local(Duration::from_millis(500), move || {
-                    let busy = state
-                        .borrow()
-                        .jobs
-                        .iter()
-                        .any(|r| r.handle.as_ref().is_some_and(|h| !h.is_finished()));
-                    if busy {
-                        let _ = &guard;
-                        glib::ControlFlow::Continue
-                    } else {
-                        glib::ControlFlow::Break
-                    }
-                });
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
+        let (state, ui) = (state.clone(), ui.clone());
+        win::init(Box::new(move |ev| match ev {
+            win::Event::Show => ui.window.present(),
+            win::Event::PauseAll => set_all_paused(&state, true),
+            win::Event::ResumeAll => set_all_paused(&state, false),
+            win::Event::Exit => exit_app(&state, &ui),
+            win::Event::Paste {
+                kind,
+                sources,
+                dest,
+            } => {
+                if let Err(e) = start_job(&state, &ui, kind, sources, dest) {
+                    ui.window.present();
+                    alert(&ui.window, &e);
+                }
             }
+        }));
+        // The tray keeps Tufan running with no window open; Exit quits.
+        std::mem::forget(app.hold());
+        app.connect_shutdown(|_| win::remove_tray());
+    }
+
+    {
+        let (state, ui) = (state.clone(), ui.clone());
+        window.connect_close_request(move |w| {
+            #[cfg(windows)]
+            return close_main(&state, &ui, w);
+            #[cfg(not(windows))]
+            return keep_running_while_busy(&state, &ui, w);
         });
     }
 
-    window.present();
+    if !(cfg!(windows) && background) {
+        window.present();
+    }
+}
+
+#[cfg(windows)]
+fn close_main(state: &Shared, ui: &Ui, w: &gtk4::ApplicationWindow) -> glib::Propagation {
+    if win::close_to_tray() {
+        w.set_visible(false);
+    } else {
+        exit_app(state, ui);
+    }
+    glib::Propagation::Stop
+}
+
+/// Keep running while jobs are active even if the window is closed.
+#[cfg(not(windows))]
+fn keep_running_while_busy(
+    state: &Shared,
+    ui: &Ui,
+    w: &gtk4::ApplicationWindow,
+) -> glib::Propagation {
+    if !any_active(state) {
+        return glib::Propagation::Proceed;
+    }
+    w.set_visible(false);
+    let guard = ui.app.hold();
+    let state = state.clone();
+    glib::timeout_add_local(Duration::from_millis(500), move || {
+        if any_active(&state) {
+            let _ = &guard;
+            glib::ControlFlow::Continue
+        } else {
+            glib::ControlFlow::Break
+        }
+    });
+    glib::Propagation::Stop
+}
+
+fn any_active(state: &Shared) -> bool {
+    state
+        .borrow()
+        .jobs
+        .iter()
+        .any(|r| r.handle.as_ref().is_some_and(|h| !h.is_finished()))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn set_all_paused(state: &Shared, paused: bool) {
+    for r in &state.borrow().jobs {
+        if let Some(h) = r.handle.as_ref().filter(|h| !h.is_finished()) {
+            if paused {
+                h.pause();
+            } else {
+                h.resume();
+            }
+        }
+    }
+}
+
+/// Quit from the tray. Interrupted jobs stay in the journal and are
+/// offered for resumption on the next start.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn exit_app(state: &Shared, ui: &Ui) {
+    if !any_active(state) {
+        ui.app.quit();
+        return;
+    }
+    ui.window.present();
+    let d = gtk4::AlertDialog::builder()
+        .message("Transfers are still running")
+        .detail("Exiting pauses them. They can be resumed the next time Tufan starts.")
+        .buttons(["Keep Running", "Pause and Exit"])
+        .cancel_button(0)
+        .default_button(0)
+        .modal(true)
+        .build();
+    let (state, ui) = (state.clone(), ui.clone());
+    glib::spawn_future_local(async move {
+        if d.choose_future(Some(&ui.window)).await == Ok(1) {
+            set_all_paused(&state, true);
+            ui.app.quit();
+        }
+    });
+}
+
+/// Starts a transfer with the options selected in the main window.
+fn start_job(
+    state: &Shared,
+    ui: &Ui,
+    kind: JobKind,
+    mut sources: Vec<PathBuf>,
+    dest: PathBuf,
+) -> Result<(), String> {
+    let in_place = |p: &PathBuf| p.parent() == Some(dest.as_path());
+    let mut conflict = [
+        ConflictPolicy::Fail,
+        ConflictPolicy::Skip,
+        ConflictPolicy::Rename,
+        ConflictPolicy::Overwrite,
+    ][ui.conflict.selected() as usize % 4];
+    match kind {
+        // Moving an item into its own folder is a no-op, as in Explorer.
+        JobKind::Move => sources.retain(|p| !in_place(p)),
+        // Copying into the same folder keeps both, as in Explorer.
+        JobKind::Copy if sources.iter().any(in_place) => conflict = ConflictPolicy::Rename,
+        JobKind::Copy => {}
+    }
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let options = Options {
+        integrity: [
+            IntegrityMode::Verified,
+            IntegrityMode::DurableVerified,
+            IntegrityMode::Fast,
+        ][ui.integrity.selected() as usize % 3],
+        conflict,
+        ..Options::default()
+    };
+    let journal = state.borrow().journal.clone();
+    let h = tufan_core::start(
+        journal,
+        JobSpec {
+            kind,
+            sources,
+            dest_dir: dest,
+            options,
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    add_job_row(state, ui, Some(Arc::new(h)), None);
+    Ok(())
 }
 
 fn section(title: &str, body: &gtk4::Label) -> gtk4::Box {
@@ -425,6 +626,17 @@ fn add_from_model(state: &Shared, list: &gio::ListModel) {
     }
 }
 
+fn add_files_list(state: &Shared, list: &gdk::FileList) {
+    let mut st = state.borrow_mut();
+    for f in list.files() {
+        if let Some(p) = f.path() {
+            if !st.sources.contains(&p) {
+                st.sources.push(p);
+            }
+        }
+    }
+}
+
 fn alert(win: &gtk4::ApplicationWindow, msg: &str) {
     let d = gtk4::AlertDialog::builder()
         .message(msg)
@@ -433,19 +645,7 @@ fn alert(win: &gtk4::ApplicationWindow, msg: &str) {
     d.show(Some(win));
 }
 
-fn add_job_row(
-    state: &Shared,
-    jobs_box: &gtk4::Box,
-    handle: Option<Arc<JobHandle>>,
-    restored: Option<tufan_core::journal::JobRow>,
-) {
-    let (job_id, spec) = match (&handle, &restored) {
-        (Some(h), _) => (h.id(), h.spec().clone()),
-        (None, Some(r)) => (r.id, r.spec.clone()),
-        _ => return,
-    };
-    let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-    widget.add_css_class("job");
+fn job_description(spec: &JobSpec) -> (&'static str, String) {
     let verb = if spec.kind == JobKind::Copy {
         "Copy"
     } else {
@@ -458,6 +658,23 @@ fn add_job_row(
             .unwrap_or_default(),
         n => format!("{n} items"),
     };
+    (verb, what)
+}
+
+fn add_job_row(
+    state: &Shared,
+    ui: &Ui,
+    handle: Option<Arc<JobHandle>>,
+    restored: Option<tufan_core::journal::JobRow>,
+) {
+    let (job_id, spec) = match (&handle, &restored) {
+        (Some(h), _) => (h.id(), h.spec().clone()),
+        (None, Some(r)) => (r.id, r.spec.clone()),
+        _ => return,
+    };
+    let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    widget.add_css_class("job");
+    let (verb, what) = job_description(&spec);
     let title = gtk4::Label::new(Some(&format!(
         "{verb} {what} → {}",
         spec.dest_dir.display()
@@ -474,6 +691,8 @@ fn add_job_row(
     status.add_css_class("muted");
     status.set_xalign(0.0);
     status.set_hexpand(true);
+    let log = gtk4::Button::with_label("Log");
+    log.set_tooltip_text(Some("Show the per-file log"));
     let pause = gtk4::Button::with_label("Pause");
     let cancel = gtk4::Button::with_label("Cancel");
     let retry = gtk4::Button::with_label(if handle.is_some() {
@@ -487,6 +706,7 @@ fn add_job_row(
     let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     for w in [
         status.upcast_ref::<gtk4::Widget>(),
+        log.upcast_ref(),
         pause.upcast_ref(),
         cancel.upcast_ref(),
         retry.upcast_ref(),
@@ -496,51 +716,51 @@ fn add_job_row(
     widget.append(&title);
     widget.append(&bar);
     widget.append(&controls);
-    jobs_box.append(&widget);
+    ui.jobs_box.append(&widget);
 
     let idx = state.borrow().jobs.len();
     {
-        let state = state.clone();
-        pause.connect_clicked(move |b| {
-            let st = state.borrow();
-            if let Some(h) = &st.jobs[idx].handle {
-                if h.state() == JobState::Paused {
-                    h.resume();
-                    b.set_label("Pause");
-                } else {
-                    h.pause();
-                    b.set_label("Resume");
-                }
-            }
-        });
+        let (state, ui) = (state.clone(), ui.clone());
+        log.connect_clicked(move |_| open_log(&state, &ui, idx));
     }
     {
         let state = state.clone();
-        cancel.connect_clicked(move |_| {
-            if let Some(h) = &state.borrow().jobs[idx].handle {
-                h.cancel();
-            }
-        });
+        pause.connect_clicked(move |_| toggle_pause(&state, idx));
     }
     {
         let state = state.clone();
+        cancel.connect_clicked(move |_| cancel_job(&state, idx));
+    }
+    {
+        let (state, ui) = (state.clone(), ui.clone());
         retry.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             let journal = st.journal.clone();
             let row = &mut st.jobs[idx];
             match tufan_core::resume(journal, row.job_id) {
                 Ok(h) => {
-                    row.handle = Some(Arc::new(h));
+                    let h = Arc::new(h);
+                    row.handle = Some(h.clone());
+                    row.finish_seen = false;
                     row.retry.set_visible(false);
                     row.pause.set_visible(true);
                     row.pause.set_label("Pause");
                     row.cancel.set_visible(true);
+                    if let Some(c) = row.compact.take() {
+                        c.win.destroy();
+                    }
+                    drop(st);
+                    let c = compact_window(&state, &ui, idx, h.spec());
+                    state.borrow_mut().jobs[idx].compact = Some(c);
                 }
                 Err(e) => row.status.set_text(&format!("Cannot resume: {e}")),
             }
         });
     }
 
+    let compact = handle
+        .as_ref()
+        .map(|h| compact_window(state, ui, idx, h.spec()));
     state.borrow_mut().jobs.push(JobRow {
         handle,
         job_id,
@@ -551,14 +771,373 @@ fn add_job_row(
         pause,
         cancel,
         retry,
+        compact,
+        finish_seen: false,
         last: (Instant::now(), 0),
         speed: 0.0,
     });
 }
 
+fn toggle_pause(state: &Shared, idx: usize) {
+    if let Some(h) = &state.borrow().jobs[idx].handle {
+        if h.state() == JobState::Paused {
+            h.resume();
+        } else {
+            h.pause();
+        }
+    }
+}
+
+fn cancel_job(state: &Shared, idx: usize) {
+    if let Some(h) = &state.borrow().jobs[idx].handle {
+        h.cancel();
+    }
+}
+
+fn compact_window(state: &Shared, ui: &Ui, idx: usize, spec: &JobSpec) -> Compact {
+    let (verb, what) = job_description(spec);
+    let verb = if verb == "Copy" { "Copying" } else { "Moving" };
+    let base = format!("{verb} {what}");
+    let win = gtk4::Window::builder()
+        .title(&base)
+        .default_width(460)
+        .resizable(false)
+        .hide_on_close(true)
+        .build();
+    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    root.set_margin_top(14);
+    root.set_margin_bottom(14);
+    root.set_margin_start(16);
+    root.set_margin_end(16);
+    let title = gtk4::Label::new(Some(&base));
+    title.add_css_class("job-title");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    let to = gtk4::Label::new(Some(&format!("to {}", spec.dest_dir.display())));
+    to.add_css_class("muted");
+    to.set_xalign(0.0);
+    to.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    let bar = gtk4::ProgressBar::new();
+    bar.set_margin_top(4);
+    let rate = gtk4::Label::new(Some("Scanning…"));
+    rate.set_xalign(0.0);
+    let counts = gtk4::Label::new(None);
+    counts.add_css_class("muted");
+    counts.set_xalign(0.0);
+    let log = gtk4::Button::with_label("Log");
+    let details = gtk4::Button::with_label("Details");
+    details.set_tooltip_text(Some("Open the main Tufan window"));
+    let pause = gtk4::Button::with_label("Pause");
+    let cancel = gtk4::Button::with_label("Cancel");
+    let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    buttons.set_margin_top(6);
+    let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    for w in [
+        log.upcast_ref::<gtk4::Widget>(),
+        details.upcast_ref(),
+        spacer.upcast_ref(),
+        pause.upcast_ref(),
+        cancel.upcast_ref(),
+    ] {
+        buttons.append(w);
+    }
+    for w in [
+        title.upcast_ref::<gtk4::Widget>(),
+        to.upcast_ref(),
+        bar.upcast_ref(),
+        rate.upcast_ref(),
+        counts.upcast_ref(),
+        buttons.upcast_ref(),
+    ] {
+        root.append(w);
+    }
+    win.set_child(Some(&root));
+    {
+        let (state, ui) = (state.clone(), ui.clone());
+        log.connect_clicked(move |_| open_log(&state, &ui, idx));
+    }
+    {
+        let main = ui.window.clone();
+        details.connect_clicked(move |_| main.present());
+    }
+    {
+        let state = state.clone();
+        pause.connect_clicked(move |_| toggle_pause(&state, idx));
+    }
+    {
+        let state = state.clone();
+        cancel.connect_clicked(move |_| cancel_job(&state, idx));
+    }
+    win.present();
+    Compact {
+        win,
+        title: base,
+        bar,
+        rate,
+        counts,
+        pause,
+        cancel,
+    }
+}
+
+// --- Job log ------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+enum Level {
+    Success,
+    Skipped,
+    Failed,
+    Error,
+    Pending,
+}
+
+const LOG_FILTERS: [&str; 5] = ["All", "Success", "Skipped", "Failed", "Errors"];
+
+fn level_shown(filter: u32, l: Level) -> bool {
+    match filter {
+        1 => l == Level::Success,
+        2 => l == Level::Skipped,
+        3 => l == Level::Failed,
+        4 => l == Level::Error,
+        _ => true,
+    }
+}
+
+fn log_entries(journal: &Journal, job_id: i64, handle: Option<&JobHandle>) -> Vec<(Level, String)> {
+    let mut out = Vec::new();
+    let mut file_errors = HashSet::new();
+    let mut files = Vec::new();
+    let roots: Vec<PathBuf> = journal
+        .load_job(job_id)
+        .ok()
+        .flatten()
+        .map(|j| j.spec.sources)
+        .unwrap_or_default();
+    // Paths as seen from the folder the sources were copied from.
+    let relative = |p: &Path| {
+        roots
+            .iter()
+            .find(|r| p.starts_with(r))
+            .and_then(|r| r.parent())
+            .and_then(|base| p.strip_prefix(base).ok())
+            .unwrap_or(p)
+            .display()
+            .to_string()
+    };
+    for r in journal.items(job_id).unwrap_or_default() {
+        let path = journal::key_path(&r.key);
+        let src = path
+            .as_deref()
+            .map(relative)
+            .unwrap_or_else(|| String::from_utf8_lossy(&r.key).into_owned());
+        let entry = match (r.state, r.error) {
+            (ItemState::Failed | ItemState::Partial | ItemState::Committed, Some(e)) => {
+                let line = format!("FAILED   {src}: {e}");
+                file_errors.insert(e);
+                (Level::Failed, line)
+            }
+            (ItemState::Failed, None) => (Level::Failed, format!("FAILED   {src}")),
+            (ItemState::Done, _) => {
+                // Only worth showing when "Keep both" renamed the copy.
+                let dest = r
+                    .dest
+                    .filter(|d| d.file_name() != path.as_deref().and_then(|p| p.file_name()))
+                    .and_then(|d| d.file_name().map(|n| format!(" → {}", n.to_string_lossy())));
+                (
+                    Level::Success,
+                    format!(
+                        "OK       {src}{}  ({})",
+                        dest.unwrap_or_default(),
+                        fmt_bytes(r.size)
+                    ),
+                )
+            }
+            (ItemState::Skipped, _) => (Level::Skipped, format!("SKIPPED  {src}")),
+            (ItemState::Partial | ItemState::Committed, None) => {
+                (Level::Pending, format!("PENDING  {src}"))
+            }
+        };
+        files.push(entry);
+    }
+    // Job-level errors (scan failures and the like) that no file row shows.
+    if let Some(h) = handle {
+        let report = h.report();
+        for e in report.errors {
+            if !file_errors.contains(&e) {
+                out.push((Level::Error, format!("ERROR    {e}")));
+            }
+        }
+        if report.errors_truncated {
+            out.push((
+                Level::Error,
+                "ERROR    (further errors not recorded)".into(),
+            ));
+        }
+    }
+    out.extend(files);
+    out
+}
+
+fn open_log(state: &Shared, ui: &Ui, idx: usize) {
+    let (journal, job_id, handle, title) = {
+        let st = state.borrow();
+        let r = &st.jobs[idx];
+        (
+            st.journal.clone(),
+            r.job_id,
+            r.handle.clone(),
+            r.title.text().to_string(),
+        )
+    };
+    let load = move || log_entries(&journal, job_id, handle.as_deref());
+    let entries = Rc::new(RefCell::new(load()));
+
+    let win = gtk4::Window::builder()
+        .title(format!("Log — {title}"))
+        .default_width(820)
+        .default_height(480)
+        .transient_for(&ui.window)
+        .build();
+    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    root.set_margin_top(12);
+    root.set_margin_bottom(12);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
+    let filter = gtk4::DropDown::from_strings(&LOG_FILTERS);
+    filter.set_tooltip_text(Some("Show only entries of this kind"));
+    let counts = gtk4::Label::new(None);
+    counts.add_css_class("muted");
+    counts.set_xalign(0.0);
+    counts.set_hexpand(true);
+    let refresh = gtk4::Button::with_label("Refresh");
+    let save = gtk4::Button::with_label("Save…");
+    let bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    for w in [
+        filter.upcast_ref::<gtk4::Widget>(),
+        counts.upcast_ref(),
+        refresh.upcast_ref(),
+        save.upcast_ref(),
+    ] {
+        bar.append(w);
+    }
+
+    let model = gtk4::StringList::new(&[]);
+    let factory = gtk4::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let l = gtk4::Label::new(None);
+        l.set_xalign(0.0);
+        l.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        l.add_css_class("log");
+        if let Some(item) = item.downcast_ref::<gtk4::ListItem>() {
+            item.set_child(Some(&l));
+        }
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk4::ListItem>() else {
+            return;
+        };
+        let text = item
+            .item()
+            .and_downcast::<gtk4::StringObject>()
+            .map(|s| s.string());
+        if let (Some(l), Some(text)) = (item.child().and_downcast::<gtk4::Label>(), text) {
+            l.set_text(&text);
+            l.set_tooltip_text(Some(&text));
+        }
+    });
+    let list = gtk4::ListView::new(
+        Some(gtk4::NoSelection::new(Some(model.clone()))),
+        Some(factory),
+    );
+    let scroller = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&list)
+        .build();
+    let frame = gtk4::Frame::new(None);
+    frame.set_child(Some(&scroller));
+    root.append(&bar);
+    root.append(&frame);
+    win.set_child(Some(&root));
+
+    let apply = {
+        let (entries, filter, model, counts) = (
+            entries.clone(),
+            filter.clone(),
+            model.clone(),
+            counts.clone(),
+        );
+        Rc::new(move || {
+            let entries = entries.borrow();
+            let f = filter.selected();
+            let shown: Vec<&str> = entries
+                .iter()
+                .filter(|(l, _)| level_shown(f, *l))
+                .map(|(_, s)| s.as_str())
+                .collect();
+            model.splice(0, model.n_items(), &shown);
+            let n = |level| entries.iter().filter(|(l, _)| *l == level).count();
+            counts.set_text(&format!(
+                "{} succeeded · {} skipped · {} failed · {} errors",
+                n(Level::Success),
+                n(Level::Skipped),
+                n(Level::Failed),
+                n(Level::Error)
+            ));
+        })
+    };
+    apply();
+    {
+        let apply = apply.clone();
+        filter.connect_selected_notify(move |_| apply());
+    }
+    {
+        let (entries, apply) = (entries.clone(), apply.clone());
+        refresh.connect_clicked(move |_| {
+            *entries.borrow_mut() = load();
+            apply();
+        });
+    }
+    {
+        let (entries, filter, win2) = (entries.clone(), filter.clone(), win.clone());
+        save.connect_clicked(move |_| {
+            let f = filter.selected();
+            let text: String = entries
+                .borrow()
+                .iter()
+                .filter(|(l, _)| level_shown(f, *l))
+                .map(|(_, s)| format!("{s}\n"))
+                .collect();
+            let win = win2.clone();
+            glib::spawn_future_local(async move {
+                let d = gtk4::FileDialog::builder()
+                    .title("Save log")
+                    .initial_name(format!("tufan-job-{job_id}.log"))
+                    .modal(true)
+                    .build();
+                if let Ok(file) = d.save_future(Some(&win)).await {
+                    if let Some(p) = file.path() {
+                        if let Err(e) = std::fs::write(&p, text) {
+                            let a = gtk4::AlertDialog::builder()
+                                .message(format!("Cannot save the log: {e}"))
+                                .modal(true)
+                                .build();
+                            a.show(Some(&win));
+                        }
+                    }
+                }
+            });
+        });
+    }
+    win.present();
+}
+
+// --- Progress -------------------------------------------------------------------
+
 fn tick(state: &Shared, summary: &gtk4::Label) {
     let mut st = state.borrow_mut();
     let (mut active, mut bytes, mut speed_total) = (0, 0u64, 0f64);
+    let (mut active_done, mut active_known) = (0u64, 0u64);
     for row in st.jobs.iter_mut() {
         let Some(h) = row.handle.clone() else {
             continue;
@@ -584,24 +1163,21 @@ fn tick(state: &Shared, summary: &gtk4::Label) {
         };
 
         // Honest progress: pulse while totals are unknown.
-        if s.scan_complete && s.bytes_known > 0 {
-            row.bar
-                .set_fraction((s.bytes_done as f64 / s.bytes_known as f64).min(1.0));
+        let fraction = if s.scan_complete && s.bytes_known > 0 {
+            Some((s.bytes_done as f64 / s.bytes_known as f64).min(1.0))
         } else if s.scan_complete {
-            row.bar.set_fraction(if finished { 1.0 } else { 0.0 });
-        } else if !finished {
-            row.bar.pulse();
-        }
+            Some(if finished { 1.0 } else { 0.0 })
+        } else {
+            None
+        };
         let total = if s.scan_complete {
             s.files_discovered.to_string()
         } else {
             format!("{}+", s.files_discovered)
         };
-        let mut text = format!(
-            "{} · {}/{} files · {} of {}",
-            label_for(state_now, s.scan_complete),
-            s.files_done + s.files_skipped,
-            total,
+        let files = format!("{}/{} files", s.files_done + s.files_skipped, total);
+        let of_bytes = format!(
+            "{} of {}",
             fmt_bytes(s.bytes_done),
             if s.scan_complete {
                 fmt_bytes(s.bytes_known)
@@ -609,36 +1185,91 @@ fn tick(state: &Shared, summary: &gtk4::Label) {
                 "…".into()
             }
         );
+        let mut rate = String::new();
         if !finished && state_now == JobState::Running {
-            text += &format!(" · {}/s", fmt_bytes(row.speed as u64));
+            rate = format!("{}/s", fmt_bytes(row.speed as u64));
             if s.scan_complete && row.speed > 1024.0 && s.bytes_known > s.bytes_done {
                 let secs = (s.bytes_known - s.bytes_done) as f64 / row.speed;
                 if secs > 3.0 {
-                    text += &format!(" · about {} left", fmt_dur(secs));
+                    rate += &format!(" · about {} left", fmt_dur(secs));
                 }
             }
             active += 1;
             speed_total += row.speed;
+            active_done += s.bytes_done;
+            active_known += s.bytes_known.max(s.bytes_done);
         }
+        let failed = if s.files_failed > 0 {
+            format!(" · {} failed", s.files_failed)
+        } else {
+            String::new()
+        };
+        let label = label_for(state_now, s.scan_complete);
+        let mut text = format!("{label} · {files} · {of_bytes}");
+        if !rate.is_empty() {
+            text += &format!(" · {rate}");
+        }
+        text += &failed;
         if s.files_failed > 0 {
-            text += &format!(" · {} failed", s.files_failed);
             if let Some(e) = h.report().errors.first() {
                 row.status.set_tooltip_text(Some(e));
             }
         }
         row.status.set_text(&text);
+        let paused = state_now == JobState::Paused;
+        row.pause.set_label(if paused { "Resume" } else { "Pause" });
+        match fraction {
+            Some(f) => row.bar.set_fraction(f),
+            None if !finished => row.bar.pulse(),
+            None => {}
+        }
+
+        if let Some(c) = &row.compact {
+            match fraction {
+                Some(f) => c.bar.set_fraction(f),
+                None if !finished => c.bar.pulse(),
+                None => {}
+            }
+            let pct = fraction.map(|f| format!("{:.0}% · ", f * 100.0));
+            c.rate.set_text(&if finished || paused {
+                format!("{}{label}", pct.clone().unwrap_or_default())
+            } else if rate.is_empty() {
+                label.to_string()
+            } else {
+                format!("{}{rate}", pct.clone().unwrap_or_default())
+            });
+            c.counts.set_text(&format!("{files} · {of_bytes}{failed}"));
+            c.pause.set_label(if paused { "Resume" } else { "Pause" });
+            if let Some(p) = &pct {
+                let title = format!("{} — {}", p.trim_end_matches(" · "), c.title);
+                c.win.set_title(Some(&title));
+            }
+        }
+
         bytes += s.bytes_done;
-        if finished {
+        if finished && !row.finish_seen {
+            row.finish_seen = true;
             row.pause.set_visible(false);
             row.cancel.set_visible(false);
             row.retry.set_label("Retry Failed");
             row.retry.set_visible(
                 s.files_failed > 0 || matches!(state_now, JobState::Cancelled | JobState::Failed),
             );
+            if let Some(c) = &row.compact {
+                c.pause.set_visible(false);
+                c.cancel.set_visible(false);
+                // A clean finish needs no attention: close shortly after.
+                if state_now == JobState::Completed && s.files_failed == 0 {
+                    let w = c.win.clone();
+                    glib::timeout_add_local_once(Duration::from_secs(3), move || w.close());
+                } else {
+                    c.win.present();
+                }
+            }
         }
         let _ = (&row.widget, &row.title);
     }
-    summary.set_text(&if active == 0 {
+    let text = if active == 0 {
         "No active jobs".to_string()
     } else {
         format!(
@@ -646,7 +1277,25 @@ fn tick(state: &Shared, summary: &gtk4::Label) {
             fmt_bytes(bytes),
             fmt_bytes(speed_total as u64)
         )
-    });
+    };
+    summary.set_text(&text);
+
+    let tray = if active == 0 {
+        "Tufan".to_string()
+    } else if active_known > 0 {
+        format!(
+            "Tufan — {active} active · {:.0}% · {}/s",
+            active_done as f64 * 100.0 / active_known as f64,
+            fmt_bytes(speed_total as u64)
+        )
+    } else {
+        format!("Tufan — {active} active")
+    };
+    if tray != st.tray_status {
+        #[cfg(windows)]
+        win::set_status(&tray);
+        st.tray_status = tray;
+    }
 }
 
 fn label_for(s: JobState, scanned: bool) -> &'static str {

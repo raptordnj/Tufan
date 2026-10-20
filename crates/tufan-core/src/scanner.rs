@@ -113,6 +113,11 @@ pub fn scan(
             let rd = match fs::read_dir(&dir) {
                 Ok(rd) => rd,
                 Err(e) => {
+                    // One entry stands for everything inside: say so.
+                    let e = io::Error::new(
+                        e.kind(),
+                        format!("cannot read folder, its contents were not copied: {e}"),
+                    );
                     send(Item::Failed {
                         path: dir.clone(),
                         error: Error::io(&dir, e),

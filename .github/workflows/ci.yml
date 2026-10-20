@@ -18,4 +18,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
-      - run: cargo build --release -p tufan-gtk
+      - run: cargo clippy --release -p tufan-gtk -- -D warnings
+  gtk-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-binutils
+      - run: cargo clippy --release -p tufan-gtk -- -D warnings

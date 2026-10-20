@@ -16,14 +16,16 @@
 - [x] README with guarantees and limitations
 
 ## Later
-- [ ] Windows tray, run-at-login, clipboard import (CF_HDROP), Explorer extension
+- [x] Windows tray, run-at-login, clipboard import (CF_HDROP), Explorer paste takeover (keyboard hook, opt-in)
 - [ ] ACL / xattr / ADS / sparse preservation
 - [ ] macOS .app/.dmg, signing/notarization
 - [ ] FreeBSD validation
 - [ ] CI matrix for all OS/arch targets
-- [ ] Tray icon (GTK 4 has none; needs StatusNotifierItem on Linux / Shell_NotifyIcon on Windows)
-- [ ] Explorer Ctrl+V interception (shell extension, opt-in)
-- [ ] Run-at-login toggle in the UI (installer option exists)
+- [x] Tray icon on Windows (Shell_NotifyIcon)
+- [ ] Tray icon on Linux (StatusNotifierItem)
+- [ ] Explorer right-drag "Copy/Move with Tufan" (needs a shell extension)
+- [ ] Explorer paste on the desktop and in virtual folders
+- [x] Run-at-login toggle in the UI (tray menu)
 - [ ] Abandoned temp cleanup on resume across all destination dirs (`engine::clean_temps` exists, not wired)
 - [ ] Settings persistence in the UI
 - [ ] Cold-cache, HDD, USB and network benchmarks

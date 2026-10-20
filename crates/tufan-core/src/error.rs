@@ -41,9 +41,11 @@ pub(crate) fn is_retryable_io(e: &io::Error) -> bool {
     if matches!(e.kind(), Interrupted | TimedOut | WouldBlock | ResourceBusy) {
         return true;
     }
-    // ERROR_SHARING_VIOLATION (32) / ERROR_LOCK_VIOLATION (33)
+    // ERROR_SHARING_VIOLATION (32), ERROR_LOCK_VIOLATION (33), and
+    // ERROR_ACCESS_DENIED (5) / ERROR_USER_MAPPED_FILE (1224), which
+    // antivirus and indexers cause briefly on files that were just written.
     #[cfg(windows)]
-    if matches!(e.raw_os_error(), Some(32) | Some(33)) {
+    if matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33) | Some(1224)) {
         return true;
     }
     false

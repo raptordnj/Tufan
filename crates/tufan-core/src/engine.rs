@@ -1,6 +1,6 @@
 //! Job orchestration: one scanner thread, a bounded queue, N workers.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -14,7 +14,7 @@ use crate::error::{Error, Result};
 use crate::faults::{self, Stage};
 use crate::filesystem::{self as fsx, SourceId};
 use crate::journal::{path_key, ItemRecord, ItemState, JobState, Journal};
-use crate::policy::{JobKind, JobSpec, LinkPolicy};
+use crate::policy::{ConflictPolicy, IntegrityMode, JobKind, JobSpec, LinkPolicy};
 use crate::scanner::{self, Item};
 use crate::transfer::{self, Ctx, Outcome};
 
@@ -275,11 +275,25 @@ fn worker(s: &Shared, rx: &Mutex<Receiver<Item>>) {
         let (path, result) = match item {
             Item::Failed { path, error } => (path, Err(error)),
             Item::Symlink { src, dest } => {
-                let r = with_retry(s, || copy_symlink(s, &src, &dest));
+                let r = with_retry(s, || copy_symlink(s, &src, &dest, &mut buf));
                 (src, r)
             }
             Item::File { src, dest, md } => {
-                let r = with_retry(s, || process_file(s, &src, &md, &dest, &mut buf));
+                let mut md = md;
+                let mut first = true;
+                let r = with_retry(s, || {
+                    // A retry after "source changed" must compare against
+                    // the file as it is now, not as it was when scanned.
+                    if !std::mem::take(&mut first) {
+                        if let Some(now) = fs::symlink_metadata(&src).ok().filter(|m| m.is_file()) {
+                            let known = &s.progress.bytes_known;
+                            known.fetch_add(now.len(), Ordering::Relaxed);
+                            known.fetch_sub(md.len(), Ordering::Relaxed);
+                            md = now;
+                        }
+                    }
+                    process_file(s, &src, &md, &dest, &mut buf)
+                });
                 (src, r)
             }
         };
@@ -382,12 +396,43 @@ fn process_file(
         }
     }
 
-    // Copying a file onto itself would destroy it on move.
-    // Compared by identity (dev/inode) to avoid per-file canonicalisation.
+    // Copying a file onto itself would destroy it on move. Compared by
+    // file identity, which also catches junctions, mapped drives and other
+    // spellings of the same path.
     if let Ok(d) = fs::symlink_metadata(dest) {
-        let did = SourceId::of(&d);
-        if cfg!(unix) && (did.dev, did.ino) == (src_id.dev, src_id.ino) {
-            return Err(Error::Conflict(dest.to_path_buf()));
+        if d.is_file() && fsx::same_file(src, dest) {
+            // Only "keep both" can copy a file into its own place.
+            if is_move || s.spec.options.conflict != ConflictPolicy::Rename {
+                return Err(Error::Conflict(dest.to_path_buf()));
+            }
+        } else if d.is_file() && already_copied(s, src, md, &d, dest, buf)? {
+            // A previous run (whose journal batch was lost in a crash) or
+            // the user already put exactly this content there.
+            let _ = fs::remove_file(fsx::temp_path(dest, s.id, &key));
+            s.progress.bytes_done.fetch_add(md.len(), Ordering::Relaxed);
+            let rec = |state| ItemRecord {
+                key: key.clone(),
+                state,
+                dest: Some(dest.to_path_buf()),
+                size: md.len(),
+                src_id: Some(src_id.encode()),
+                offset: 0,
+                prefix_hash: None,
+                error: None,
+            };
+            if !is_move {
+                s.journal.put(s.id, rec(ItemState::Done))?;
+                return Ok(Done::Done);
+            }
+            // The copy must be durable before the source goes away.
+            File::open(dest)
+                .and_then(|f| f.sync_all())
+                .map_err(|e| Error::io(dest, e))?;
+            if let Some(parent) = dest.parent() {
+                fsx::sync_dir(parent).map_err(|e| Error::io(parent, e))?;
+            }
+            s.journal.put_durable(s.id, rec(ItemState::Committed))?;
+            return finish_move(s, src, src_id, Some(&src_id.encode()), dest, &key, md.len());
         }
     }
 
@@ -447,6 +492,34 @@ fn process_file(
     }
 }
 
+/// True when `dest` already holds exactly the source content. Applies to
+/// the Fail and Skip policies (nothing to ask about) and to resumed jobs,
+/// where the file is most likely our own published copy.
+fn already_copied(
+    s: &Shared,
+    src: &Path,
+    md: &fs::Metadata,
+    dest_md: &fs::Metadata,
+    dest: &Path,
+    buf: &mut Vec<u8>,
+) -> Result<bool> {
+    let o = &s.spec.options;
+    let applies = matches!(o.conflict, ConflictPolicy::Fail | ConflictPolicy::Skip) || s.resumed;
+    if !applies || dest_md.len() != md.len() {
+        return Ok(false);
+    }
+    if o.integrity == IntegrityMode::Fast {
+        // Fast mode trusts size and modification time, which Tufan copies.
+        return Ok(
+            dest_md.modified().ok().is_some() && dest_md.modified().ok() == md.modified().ok()
+        );
+    }
+    match fsx::same_content(src, dest, buf) {
+        Ok(same) => Ok(same),
+        Err(e) => Err(Error::io(src, e)),
+    }
+}
+
 fn finish_move(
     s: &Shared,
     src: &Path,
@@ -464,7 +537,7 @@ fn finish_move(
     if !unchanged {
         return Err(Error::SourceChanged(src.to_path_buf()));
     }
-    let removal = faults::hit(Stage::SourceDelete).and_then(|_| fs::remove_file(src));
+    let removal = faults::hit(Stage::SourceDelete).and_then(|_| fsx::remove_file_force(src));
     match removal {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -492,29 +565,52 @@ fn finish_move(
     Ok(Done::Done)
 }
 
-fn copy_symlink(s: &Shared, src: &Path, dest: &Path) -> Result<Done> {
+fn copy_symlink(s: &Shared, src: &Path, dest: &Path, buf: &mut Vec<u8>) -> Result<Done> {
     if s.spec.options.links == LinkPolicy::Skip {
         return Ok(Done::Skipped);
     }
+    let kind = fsx::link_kind(src);
     let target = fs::read_link(src).map_err(|e| Error::io(src, e))?;
+    let target = fsx::retarget(&target, &s.spec.sources, &s.spec.dest_dir);
+    let finish = || -> Result<Done> {
+        if s.spec.kind == JobKind::Move {
+            fsx::remove_link(src).map_err(|e| Error::io(src, e))?;
+        }
+        Ok(Done::Done)
+    };
+    // The same link is already there (earlier run or interrupted job).
+    if fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink())
+        && fs::read_link(dest)
+            .is_ok_and(|t| fsx::strip_verbatim(&t) == fsx::strip_verbatim(&target))
+    {
+        return finish();
+    }
     let Some((dest, replace)) = transfer::resolve_dest(dest, s.spec.options.conflict)? else {
         return Ok(Done::Skipped);
     };
     if replace {
-        // Only ever replace another symlink, never a regular file.
+        // Only ever replace another link, never a regular file or folder.
         match fs::symlink_metadata(&dest) {
             Ok(m) if m.file_type().is_symlink() => {
-                fs::remove_file(&dest).map_err(|e| Error::io(&dest, e))?
+                fsx::remove_link(&dest).map_err(|e| Error::io(&dest, e))?
             }
             Ok(_) => return Err(Error::Conflict(dest)),
             Err(_) => {}
         }
     }
-    fsx::make_symlink(&target, &dest).map_err(|e| Error::io(&dest, e))?;
-    if s.spec.kind == JobKind::Move {
-        fs::remove_file(src).map_err(|e| Error::io(src, e))?;
+    match fsx::make_link(&target, &dest, kind) {
+        Ok(()) => finish(),
+        // Windows without the symlink privilege: copy what the link points
+        // to, as Explorer does, rather than fail.
+        Err(e) if kind == fsx::LinkKind::File && fsx::is_privilege_error(&e) => {
+            let md = fs::metadata(src).map_err(|e| Error::io(src, e))?;
+            if !md.is_file() {
+                return Err(Error::io(&dest, e));
+            }
+            process_file(s, src, &md, &dest, buf)
+        }
+        Err(e) => Err(Error::io(&dest, e)),
     }
-    Ok(Done::Done)
 }
 
 fn record_error(s: &Shared, msg: String) {
