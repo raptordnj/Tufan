@@ -439,8 +439,12 @@ fn cancel_leaves_no_partial_files_visible() {
     h.cancel();
     assert_eq!(h.wait(), JobState::Cancelled);
     no_temps(&dst);
-    // Every published file is complete.
-    for e in fs::read_dir(dst.join("s")).unwrap().flatten() {
+    // Every published file is complete. Cancellation may land before the
+    // scanner has created the destination directory at all.
+    let Ok(published) = fs::read_dir(dst.join("s")) else {
+        return;
+    };
+    for e in published.flatten() {
         assert_eq!(hash(&e.path()), hash(&src.join(e.file_name())));
     }
 }

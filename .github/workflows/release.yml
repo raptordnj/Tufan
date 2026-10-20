@@ -17,7 +17,7 @@ jobs:
           - { runner: ubuntu-24.04-arm, arch: aarch64 }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev rpm
       - run: cargo test --release -p tufan-core
       - run: cargo build --release --workspace
@@ -55,7 +55,7 @@ jobs:
           sed -i 's/^          //' rpm/SPECS/tufan.spec
           rpmbuild --define "_topdir $PWD/rpm" --define "debug_package %{nil}" -bb rpm/SPECS/tufan.spec
           cp rpm/RPMS/*/*.rpm .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: linux-${{ matrix.arch }}
           path: |
@@ -69,10 +69,10 @@ jobs:
       matrix:
         include:
           - { runner: macos-14, arch: arm64 }
-          - { runner: macos-13, arch: x86_64 }
+          - { runner: macos-15-intel, arch: x86_64 }
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: brew install gtk4 pkg-config
       - run: cargo test --release -p tufan-core
       - run: cargo build --release --workspace
@@ -87,7 +87,7 @@ jobs:
           printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleName</key><string>Tufan</string><key>CFBundleIdentifier</key><string>org.tufan.Tufan</string><key>CFBundleExecutable</key><string>tufan-gtk</string><key>CFBundleShortVersionString</key><string>%s</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n' "${GITHUB_REF_NAME#v}" > $A/Info.plist
           mkdir dmg && cp -R Tufan.app dmg/ && ln -s /Applications dmg/Applications && cp $N/REQUIREMENTS.txt dmg/
           hdiutil create -volname Tufan -srcfolder dmg -format UDZO $N.dmg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: macos-${{ matrix.arch }}
           path: |
@@ -100,7 +100,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -127,7 +127,7 @@ jobs:
           (cd dist && zip -qr ../tufan-$V-windows-x86_64.zip .)
           makensis -DVERSION=$V -DARCH=x86_64 -DBINDIR="$(cygpath -w "$PWD/dist")" packaging/windows/tufan.nsi
           mv packaging/windows/Tufan-*-setup.exe .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: windows-x86_64
           path: |
@@ -137,7 +137,7 @@ jobs:
   freebsd:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
@@ -148,7 +148,7 @@ jobs:
             N=tufan-${GITHUB_REF_NAME#v}-freebsd-x86_64-cli
             mkdir -p $N && cp target/release/tufan README.md $N/
             tar czf $N.tar.gz $N
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: freebsd-x86_64
           path: |
@@ -159,7 +159,7 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with: { path: out, merge-multiple: true }
       - run: cd out && sha256sum * > SHA256SUMS && ls -la
       - uses: softprops/action-gh-release@v2
