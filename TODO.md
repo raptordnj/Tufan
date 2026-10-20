@@ -6,7 +6,7 @@
 - [x] Core: safe file copy/publish with verification + checkpoints
 - [x] Core: incremental scanner, bounded worker pool
 - [x] Core: move semantics (same-fs rename, cross-fs copy-verify-delete)
-- [x] Core: SQLite journal, resume, temp cleanup
+- [x] Core: SQLite journal, resume (checkpointed temps reused; stale temp sweep not wired yet)
 - [x] Tests: integration + fault injection
 - [x] CLI
 - [x] GTK 4 UI
