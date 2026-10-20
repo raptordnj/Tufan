@@ -1,0 +1,157 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x86_64 }
+          - { runner: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev rpm
+      - run: cargo test --release -p tufan-core
+      - run: cargo build --release --workspace
+      - name: Package
+        run: |
+          V=${GITHUB_REF_NAME#v}; N=tufan-$V-linux-${{ matrix.arch }}
+          mkdir -p $N && cp target/release/tufan target/release/tufan-gtk README.md packaging/linux/* $N/
+          tar czf $N.tar.gz $N
+          D=deb/usr; mkdir -p $D/bin $D/share/applications $D/share/icons/hicolor/scalable/apps deb/DEBIAN
+          cp target/release/tufan target/release/tufan-gtk $D/bin/
+          cp packaging/linux/org.tufan.Tufan.desktop $D/share/applications/
+          cp packaging/linux/org.tufan.Tufan.svg $D/share/icons/hicolor/scalable/apps/
+          DA=$([ ${{ matrix.arch }} = x86_64 ] && echo amd64 || echo arm64)
+          printf 'Package: tufan\nVersion: %s\nArchitecture: %s\nMaintainer: Tufan developers\nDepends: libgtk-4-1 (>= 4.10)\nDescription: Safe, fast, resumable file copy and move\n' "$V" "$DA" > deb/DEBIAN/control
+          dpkg-deb --build --root-owner-group deb tufan_${V}_${DA}.deb
+          mkdir -p rpm/SPECS
+          cat > rpm/SPECS/tufan.spec <<SPEC
+          Name: tufan
+          Version: $V
+          Release: 1
+          Summary: Safe, fast, resumable file copy and move
+          License: MIT OR Apache-2.0
+          Requires: gtk4 >= 4.10
+          %description
+          Safe, fast, resumable file copy and move.
+          %install
+          mkdir -p %{buildroot}
+          cp -a $PWD/deb/usr %{buildroot}/
+          %files
+          /usr/bin/tufan
+          /usr/bin/tufan-gtk
+          /usr/share/applications/org.tufan.Tufan.desktop
+          /usr/share/icons/hicolor/scalable/apps/org.tufan.Tufan.svg
+          SPEC
+          sed -i 's/^          //' rpm/SPECS/tufan.spec
+          rpmbuild --define "_topdir $PWD/rpm" --define "debug_package %{nil}" -bb rpm/SPECS/tufan.spec
+          cp rpm/RPMS/*/*.rpm .
+      - uses: actions/upload-artifact@v4
+        with: { name: linux-${{ matrix.arch }}, path: "tufan*.tar.gz\ntufan_*.deb\ntufan-*.rpm" }
+
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, arch: arm64 }
+          - { runner: macos-13, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install gtk4 pkg-config
+      - run: cargo test --release -p tufan-core
+      - run: cargo build --release --workspace
+      - name: Package
+        run: |
+          N=tufan-${GITHUB_REF_NAME#v}-macos-${{ matrix.arch }}
+          mkdir -p $N && cp target/release/tufan target/release/tufan-gtk README.md $N/
+          echo "tufan-gtk needs GTK 4 from Homebrew: brew install gtk4" > $N/REQUIREMENTS.txt
+          tar czf $N.tar.gz $N
+          A=Tufan.app/Contents; mkdir -p $A/MacOS
+          cp target/release/tufan-gtk target/release/tufan $A/MacOS/
+          printf '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleName</key><string>Tufan</string><key>CFBundleIdentifier</key><string>org.tufan.Tufan</string><key>CFBundleExecutable</key><string>tufan-gtk</string><key>CFBundleShortVersionString</key><string>%s</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>\n' "${GITHUB_REF_NAME#v}" > $A/Info.plist
+          mkdir dmg && cp -R Tufan.app dmg/ && ln -s /Applications dmg/Applications && cp $N/REQUIREMENTS.txt dmg/
+          hdiutil create -volname Tufan -srcfolder dmg -format UDZO $N.dmg
+      - uses: actions/upload-artifact@v4
+        with: { name: macos-${{ matrix.arch }}, path: "tufan-*.tar.gz\ntufan-*.dmg" }
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-gtk4
+            mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-nsis zip
+      - run: cargo test --release -p tufan-core
+      - run: cargo build --release --workspace
+      - name: Bundle GTK runtime
+        run: |
+          mkdir -p dist/share dist/lib
+          cp target/release/tufan.exe target/release/tufan-gtk.exe README.md dist/
+          ldd dist/tufan-gtk.exe dist/tufan.exe | awk '/ucrt64/ {print $3}' | sort -u | xargs -I{} cp {} dist/
+          cp -r /ucrt64/lib/gdk-pixbuf-2.0 dist/lib/
+          mkdir -p dist/share/glib-2.0 && cp -r /ucrt64/share/glib-2.0/schemas dist/share/glib-2.0/
+          mkdir -p dist/share/icons && cp -r /ucrt64/share/icons/hicolor /ucrt64/share/icons/Adwaita dist/share/icons/
+          for d in dist/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.dll; do
+            ldd "$d" | awk '/ucrt64/ {print $3}' | xargs -r -I{} cp -n {} dist/
+          done
+      - name: Package
+        run: |
+          V=${GITHUB_REF_NAME#v}
+          (cd dist && zip -qr ../tufan-$V-windows-x86_64.zip .)
+          makensis -DVERSION=$V -DARCH=x86_64 -DBINDIR="$(cygpath -w "$PWD/dist")" packaging/windows/tufan.nsi
+          mv packaging/windows/Tufan-*-setup.exe .
+      - uses: actions/upload-artifact@v4
+        with: { name: windows-x86_64, path: "tufan-*.zip\nTufan-*-setup.exe" }
+
+  freebsd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            cargo test --release -p tufan-core
+            cargo build --release -p tufan-cli
+            N=tufan-${GITHUB_REF_NAME#v}-freebsd-x86_64-cli
+            mkdir -p $N && cp target/release/tufan README.md $N/
+            tar czf $N.tar.gz $N
+      - uses: actions/upload-artifact@v4
+        with: { name: freebsd-x86_64, path: "tufan-*.tar.gz" }
+
+  publish:
+    needs: [linux, macos, windows, freebsd]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - run: cd out && sha256sum * > SHA256SUMS && ls -la
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          prerelease: true
+          generate_release_notes: true
+          body: |
+            First milestone build. Built in CI; only Linux x86-64 has been tested by hand.
+            macOS GTK binaries require `brew install gtk4`. FreeBSD build is CLI-only.
+            Not signed or notarized. See README for guarantees and limitations.
