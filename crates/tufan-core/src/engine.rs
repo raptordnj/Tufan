@@ -1,6 +1,6 @@
 //! Job orchestration: one scanner thread, a bounded queue, N workers.
 
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -425,9 +425,7 @@ fn process_file(
                 return Ok(Done::Done);
             }
             // The copy must be durable before the source goes away.
-            File::open(dest)
-                .and_then(|f| f.sync_all())
-                .map_err(|e| Error::io(dest, e))?;
+            fsx::sync_file(dest).map_err(|e| Error::io(dest, e))?;
             if let Some(parent) = dest.parent() {
                 fsx::sync_dir(parent).map_err(|e| Error::io(parent, e))?;
             }

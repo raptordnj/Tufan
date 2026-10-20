@@ -201,6 +201,30 @@ pub fn remove_file_force(p: &Path) -> io::Result<()> {
     }
 }
 
+/// fsync an existing file by path. Windows only flushes through a handle
+/// with write access, which a read-only file refuses until the attribute is
+/// cleared; it is restored afterwards.
+pub fn sync_file(p: &Path) -> io::Result<()> {
+    if !cfg!(windows) {
+        return File::open(p)?.sync_all();
+    }
+    let open = || fs::OpenOptions::new().write(true).open(p);
+    match open() {
+        Ok(f) => f.sync_all(),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+            let perm = fs::symlink_metadata(p)?.permissions();
+            if !perm.readonly() {
+                return Err(e);
+            }
+            make_writable(p)?;
+            let r = open().and_then(|f| f.sync_all());
+            fs::set_permissions(p, perm)?;
+            r
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// True if both paths name the same file (any spelling, link or mount).
 pub fn same_file(a: &Path, b: &Path) -> bool {
     same_file::is_same_file(a, b).unwrap_or(false)
