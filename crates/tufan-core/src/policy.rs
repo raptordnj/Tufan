@@ -44,7 +44,9 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         Options {
             integrity: IntegrityMode::Verified,
             conflict: ConflictPolicy::Fail,

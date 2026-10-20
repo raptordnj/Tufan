@@ -1,18 +1,19 @@
 # Tufan TODO
 
 ## Milestone 1
-- [ ] Workspace + release profile
-- [ ] Core: errors, policies, control (pause/cancel)
-- [ ] Core: safe file copy/publish with verification + checkpoints
-- [ ] Core: incremental scanner, bounded worker pool
-- [ ] Core: move semantics (same-fs rename, cross-fs copy-verify-delete)
-- [ ] Core: SQLite journal, resume, temp cleanup
-- [ ] Tests: integration + fault injection
-- [ ] CLI
-- [ ] GTK 4 UI
-- [ ] Packaging: NSIS, PKGBUILD, deb/rpm metadata
-- [ ] Benchmarks script
-- [ ] README with guarantees and limitations
+- [x] Workspace + release profile
+- [x] Core: errors, policies, control (pause/cancel)
+- [x] Core: safe file copy/publish with verification + checkpoints
+- [x] Core: incremental scanner, bounded worker pool
+- [x] Core: move semantics (same-fs rename, cross-fs copy-verify-delete)
+- [x] Core: SQLite journal, resume, temp cleanup
+- [x] Tests: integration + fault injection
+- [x] CLI
+- [x] GTK 4 UI
+- [x] Packaging: NSIS script, PKGBUILD, .desktop + icon
+- [ ] deb/rpm/AppImage/Flatpak build recipes
+- [x] Benchmarks script
+- [x] README with guarantees and limitations
 
 ## Later
 - [ ] Windows tray, run-at-login, clipboard import (CF_HDROP), Explorer extension
@@ -20,3 +21,10 @@
 - [ ] macOS .app/.dmg, signing/notarization
 - [ ] FreeBSD validation
 - [ ] CI matrix for all OS/arch targets
+- [ ] Tray icon (GTK 4 has none; needs StatusNotifierItem on Linux / Shell_NotifyIcon on Windows)
+- [ ] Explorer Ctrl+V interception (shell extension, opt-in)
+- [ ] Run-at-login toggle in the UI (installer option exists)
+- [ ] Abandoned temp cleanup on resume across all destination dirs (`engine::clean_temps` exists, not wired)
+- [ ] Settings persistence in the UI
+- [ ] Cold-cache, HDD, USB and network benchmarks
+- [ ] Fuzzing of journal decoding; Miri on pure modules

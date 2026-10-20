@@ -1,0 +1,21 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest, macos-13]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p tufan-core -p tufan-cli --all-targets -- -D warnings
+      - run: cargo test --release -p tufan-core
+      - run: cargo build --release -p tufan-cli
+  gtk-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev
+      - run: cargo build --release -p tufan-gtk

@@ -36,7 +36,10 @@ pub struct Ctx<'a> {
 
 #[derive(Debug)]
 pub enum Outcome {
-    Copied { dest: PathBuf, lost_metadata: Vec<&'static str> },
+    Copied {
+        dest: PathBuf,
+        lost_metadata: Vec<&'static str>,
+    },
     Skipped,
 }
 
@@ -45,7 +48,9 @@ pub enum Outcome {
 pub fn resolve_dest(dest: &Path, policy: ConflictPolicy) -> Result<Option<(PathBuf, bool)>> {
     let existing = match fs::symlink_metadata(dest) {
         Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some((dest.to_path_buf(), false))),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(Some((dest.to_path_buf(), false)))
+        }
         Err(e) => return Err(Error::io(dest, e)),
     };
     let rename = || -> Result<Option<(PathBuf, bool)>> {
@@ -88,10 +93,12 @@ pub fn copy_file(
     let src_id = SourceId::of(src_md);
 
     // A partial checkpoint from a previous run pins the destination name.
-    let resume = prior.filter(|r| r.state == ItemState::Partial && r.src_id.as_deref() == Some(&src_id.encode()));
+    let resume = prior
+        .filter(|r| r.state == ItemState::Partial && r.src_id.as_deref() == Some(&src_id.encode()));
     let (dest, replace) = match resume.and_then(|r| r.dest.clone()) {
         Some(d) => {
-            let replace = fs::symlink_metadata(&d).is_ok() && ctx.opts.conflict == ConflictPolicy::Overwrite;
+            let replace =
+                fs::symlink_metadata(&d).is_ok() && ctx.opts.conflict == ConflictPolicy::Overwrite;
             if fs::symlink_metadata(&d).is_ok() && !replace {
                 match resolve_dest(&d, ctx.opts.conflict)? {
                     Some(x) => x,
@@ -110,12 +117,29 @@ pub fn copy_file(
     let temp = fsx::temp_path(&dest, ctx.job_id);
     let mut checkpointed = false;
     let mut added = 0u64;
-    let r = write_and_publish(ctx, src, src_md, src_id, &dest, &temp, replace, key, resume, &mut checkpointed, &mut added, buf);
+    let r = write_and_publish(
+        ctx,
+        src,
+        src_md,
+        src_id,
+        &dest,
+        &temp,
+        replace,
+        key,
+        resume,
+        &mut checkpointed,
+        &mut added,
+        buf,
+    );
     if r.is_err() {
         // Retries recount bytes; keep the progress total honest.
         ctx.progress.bytes_done.fetch_sub(added, Ordering::Relaxed);
         // Keep a checkpointed temp for file-level resume unless cancelled.
-        let keep = checkpointed && !matches!(r, Err(Error::Cancelled) | Err(Error::SourceChanged(_)) | Err(Error::VerifyFailed(_)));
+        let keep = checkpointed
+            && !matches!(
+                r,
+                Err(Error::Cancelled) | Err(Error::SourceChanged(_)) | Err(Error::VerifyFailed(_))
+            );
         if !keep {
             let _ = fs::remove_file(&temp);
         }
@@ -151,7 +175,9 @@ fn write_and_publish(
 
     let (mut out, mut hasher, mut written) = match try_resume(ctx, temp, resume, buf)? {
         Some((f, h, off)) => {
-            input.seek(SeekFrom::Start(off)).map_err(|e| Error::io(src, e))?;
+            input
+                .seek(SeekFrom::Start(off))
+                .map_err(|e| Error::io(src, e))?;
             ctx.progress.bytes_done.fetch_add(off, Ordering::Relaxed);
             *added += off;
             *checkpointed = true;
@@ -172,7 +198,9 @@ fn write_and_publish(
     if !hashing && size <= KERNEL_COPY_MAX && written == 0 {
         faults::hit(Stage::Write).map_err(|e| Error::io(temp, e))?;
         written = io::copy(&mut input, &mut out).map_err(|e| Error::io(temp, e))?;
-        ctx.progress.bytes_done.fetch_add(written, Ordering::Relaxed);
+        ctx.progress
+            .bytes_done
+            .fetch_add(written, Ordering::Relaxed);
         *added += written;
     } else {
         let mut next_cp = written + CHECKPOINT_EVERY;
@@ -191,7 +219,9 @@ fn write_and_publish(
                 hasher.update(&buf[..n]);
             }
             written += n as u64;
-            ctx.progress.bytes_done.fetch_add(n as u64, Ordering::Relaxed);
+            ctx.progress
+                .bytes_done
+                .fetch_add(n as u64, Ordering::Relaxed);
             *added += n as u64;
             if size >= CHECKPOINT_MIN && written >= next_cp && written < size {
                 out.sync_data().map_err(|e| Error::io(temp, e))?;
@@ -254,7 +284,10 @@ fn write_and_publish(
             fsx::sync_dir(parent).map_err(|e| Error::io(parent, e))?;
         }
     }
-    Ok(Outcome::Copied { dest: dest.to_path_buf(), lost_metadata })
+    Ok(Outcome::Copied {
+        dest: dest.to_path_buf(),
+        lost_metadata,
+    })
 }
 
 /// Validate a checkpoint by re-hashing the temp prefix. Any inconsistency
@@ -266,17 +299,23 @@ fn try_resume(
     buf: &mut [u8],
 ) -> Result<Option<(File, Hasher, u64)>> {
     let Some(rec) = resume else { return Ok(None) };
-    let (off, Some(expected)) = (rec.offset, rec.prefix_hash.as_ref()) else { return Ok(None) };
+    let (off, Some(expected)) = (rec.offset, rec.prefix_hash.as_ref()) else {
+        return Ok(None);
+    };
     if off == 0 {
         return Ok(None);
     }
-    let Ok(mut f) = OpenOptions::new().read(true).write(true).open(temp) else { return Ok(None) };
+    let Ok(mut f) = OpenOptions::new().read(true).write(true).open(temp) else {
+        return Ok(None);
+    };
     match f.metadata() {
         Ok(m) if m.is_file() && m.len() >= off => {}
         _ => return Ok(None),
     }
     ctx.control.checkpoint()?;
-    let Ok((h, n)) = integrity::hash_prefix(&mut f, off, buf) else { return Ok(None) };
+    let Ok((h, n)) = integrity::hash_prefix(&mut f, off, buf) else {
+        return Ok(None);
+    };
     if n != off || &integrity::digest(&h) != expected {
         return Ok(None);
     }

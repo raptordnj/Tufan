@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tufan
+Comment=Safe, fast file copy and move
+Exec=tufan-gtk
+Icon=org.tufan.Tufan
+Terminal=false
+Categories=Utility;FileTools;GTK;
+StartupNotify=true

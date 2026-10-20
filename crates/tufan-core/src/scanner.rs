@@ -6,7 +6,7 @@
 
 use std::fs::{self, Metadata};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::SyncSender;
 
@@ -15,9 +15,19 @@ use crate::error::{Error, Result};
 
 #[derive(Debug)]
 pub enum Item {
-    File { src: PathBuf, dest: PathBuf, md: Metadata },
-    Symlink { src: PathBuf, dest: PathBuf },
-    Failed { path: PathBuf, error: Error },
+    File {
+        src: PathBuf,
+        dest: PathBuf,
+        md: Metadata,
+    },
+    Symlink {
+        src: PathBuf,
+        dest: PathBuf,
+    },
+    Failed {
+        path: PathBuf,
+        error: Error,
+    },
 }
 
 pub struct ScanOutput {
@@ -30,7 +40,7 @@ pub struct ScanOutput {
 /// Symbolic links are reported, never followed.
 pub fn scan(
     sources: &[PathBuf],
-    dest_dir: &PathBuf,
+    dest_dir: &Path,
     tx: &SyncSender<Item>,
     control: &Control,
     progress: &Progress,
@@ -50,27 +60,43 @@ pub fn scan(
     for src in sources {
         control.checkpoint()?;
         let Some(name) = src.file_name() else {
-            send(Item::Failed { path: src.clone(), error: Error::InvalidPath(src.clone()) })?;
+            send(Item::Failed {
+                path: src.clone(),
+                error: Error::InvalidPath(src.clone()),
+            })?;
             continue;
         };
         let dest = dest_dir.join(name);
         let md = match fs::symlink_metadata(src) {
             Ok(m) => m,
             Err(e) => {
-                send(Item::Failed { path: src.clone(), error: Error::io(src, e) })?;
+                send(Item::Failed {
+                    path: src.clone(),
+                    error: Error::io(src, e),
+                })?;
                 continue;
             }
         };
         if md.file_type().is_symlink() {
-            send(Item::Symlink { src: src.clone(), dest })?;
+            send(Item::Symlink {
+                src: src.clone(),
+                dest,
+            })?;
             continue;
         }
         if md.is_file() {
-            send(Item::File { src: src.clone(), dest, md })?;
+            send(Item::File {
+                src: src.clone(),
+                dest,
+                md,
+            })?;
             continue;
         }
         if !md.is_dir() {
-            send(Item::Failed { path: src.clone(), error: Error::InvalidPath(src.clone()) })?;
+            send(Item::Failed {
+                path: src.clone(),
+                error: Error::InvalidPath(src.clone()),
+            })?;
             continue;
         }
 
@@ -78,13 +104,19 @@ pub fn scan(
         while let Some((dir, dest)) = stack.pop() {
             control.checkpoint()?;
             if let Err(e) = ensure_dir(&dir, &dest) {
-                send(Item::Failed { path: dir.clone(), error: e })?;
+                send(Item::Failed {
+                    path: dir.clone(),
+                    error: e,
+                })?;
                 continue;
             }
             let rd = match fs::read_dir(&dir) {
                 Ok(rd) => rd,
                 Err(e) => {
-                    send(Item::Failed { path: dir.clone(), error: Error::io(&dir, e) })?;
+                    send(Item::Failed {
+                        path: dir.clone(),
+                        error: Error::io(&dir, e),
+                    })?;
                     continue;
                 }
             };
@@ -95,7 +127,10 @@ pub fn scan(
                 let entry = match entry {
                     Ok(e) => e,
                     Err(e) => {
-                        send(Item::Failed { path: dir.clone(), error: Error::io(&dir, e) })?;
+                        send(Item::Failed {
+                            path: dir.clone(),
+                            error: Error::io(&dir, e),
+                        })?;
                         continue;
                     }
                 };
@@ -105,22 +140,38 @@ pub fn scan(
                 let ft = match entry.file_type() {
                     Ok(t) => t,
                     Err(e) => {
-                        send(Item::Failed { path: path.clone(), error: Error::io(&path, e) })?;
+                        send(Item::Failed {
+                            path: path.clone(),
+                            error: Error::io(&path, e),
+                        })?;
                         continue;
                     }
                 };
                 if ft.is_symlink() {
-                    send(Item::Symlink { src: path, dest: target })?;
+                    send(Item::Symlink {
+                        src: path,
+                        dest: target,
+                    })?;
                 } else if ft.is_dir() {
                     stack.push((path, target));
                 } else if ft.is_file() {
                     match entry.metadata() {
-                        Ok(md) => send(Item::File { src: path, dest: target, md })?,
-                        Err(e) => send(Item::Failed { path: path.clone(), error: Error::io(&path, e) })?,
+                        Ok(md) => send(Item::File {
+                            src: path,
+                            dest: target,
+                            md,
+                        })?,
+                        Err(e) => send(Item::Failed {
+                            path: path.clone(),
+                            error: Error::io(&path, e),
+                        })?,
                     }
                 } else {
                     // Sockets, FIFOs, devices: not copied.
-                    send(Item::Failed { path: path.clone(), error: Error::InvalidPath(path) })?;
+                    send(Item::Failed {
+                        path: path.clone(),
+                        error: Error::InvalidPath(path),
+                    })?;
                 }
             }
         }

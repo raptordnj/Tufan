@@ -23,7 +23,12 @@ impl SourceId {
             .map(|d| d.as_nanos() as i128)
             .unwrap_or(0);
         let (dev, ino) = dev_ino(md);
-        SourceId { size: md.len(), mtime_ns, dev, ino }
+        SourceId {
+            size: md.len(),
+            mtime_ns,
+            dev,
+            ino,
+        }
     }
 
     pub fn encode(&self) -> String {
@@ -78,7 +83,13 @@ pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         let t = CString::new(to.as_os_str().as_bytes())?;
         // SAFETY: valid NUL-terminated paths; AT_FDCWD for both directories.
         let r = unsafe {
-            libc::renameat2(libc::AT_FDCWD, f.as_ptr(), libc::AT_FDCWD, t.as_ptr(), libc::RENAME_NOREPLACE)
+            libc::renameat2(
+                libc::AT_FDCWD,
+                f.as_ptr(),
+                libc::AT_FDCWD,
+                t.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
         };
         if r == 0 {
             return Ok(());
@@ -188,7 +199,9 @@ pub fn existing_spelling_differs(path: &Path) -> bool {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return false;
     };
-    let Ok(rd) = fs::read_dir(parent) else { return false };
+    let Ok(rd) = fs::read_dir(parent) else {
+        return false;
+    };
     for e in rd.flatten() {
         if e.file_name() == name {
             return false;
@@ -200,17 +213,28 @@ pub fn existing_spelling_differs(path: &Path) -> bool {
 
 /// `name (n).ext` candidates for the Rename conflict policy.
 pub fn renamed_candidate(path: &Path, n: u32) -> PathBuf {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let name = match path.extension() {
         Some(ext) if !stem.is_empty() => format!("{stem} ({n}).{}", ext.to_string_lossy()),
-        _ => format!("{} ({n})", path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default()),
+        _ => format!(
+            "{} ({n})",
+            path.file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default()
+        ),
     };
     path.with_file_name(name)
 }
 
 /// Deterministic temporary name for a destination file within a job.
 pub fn temp_path(dest: &Path, job_id: i64) -> PathBuf {
-    let name = dest.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = dest
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     dest.with_file_name(format!(".{name}.tufan-{job_id}.part"))
 }
 

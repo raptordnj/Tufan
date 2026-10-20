@@ -35,6 +35,8 @@ struct Shared {
     progress: Progress,
     state: Mutex<JobState>,
     report: Mutex<Report>,
+    /// Fresh jobs have no journal items to consult.
+    resumed: bool,
 }
 
 /// Handle to a running job. Dropping it does not stop the job.
@@ -64,7 +66,10 @@ impl JobHandle {
         if *st == JobState::Running {
             self.shared.control.pause();
             *st = JobState::Paused;
-            let _ = self.shared.journal.set_job_state(self.shared.id, JobState::Paused);
+            let _ = self
+                .shared
+                .journal
+                .set_job_state(self.shared.id, JobState::Paused);
         }
     }
     pub fn resume(&self) {
@@ -72,14 +77,21 @@ impl JobHandle {
         if *st == JobState::Paused {
             self.shared.control.resume();
             *st = JobState::Running;
-            let _ = self.shared.journal.set_job_state(self.shared.id, JobState::Running);
+            let _ = self
+                .shared
+                .journal
+                .set_job_state(self.shared.id, JobState::Running);
         }
     }
     pub fn cancel(&self) {
         self.shared.control.cancel();
     }
     pub fn is_finished(&self) -> bool {
-        self.thread.lock().unwrap().as_ref().is_none_or(|t| t.is_finished())
+        self.thread
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|t| t.is_finished())
     }
     /// Wait for completion and return the final state.
     pub fn wait(&self) -> JobState {
@@ -94,15 +106,17 @@ impl JobHandle {
 pub fn start(journal: Arc<Journal>, spec: JobSpec) -> Result<JobHandle> {
     validate(&spec)?;
     let id = journal.create_job(&spec)?;
-    Ok(launch(journal, id, spec))
+    Ok(launch(journal, id, spec, false))
 }
 
 /// Resume a job recorded in the journal (after pause+exit, crash, or to
 /// retry failed items).
 pub fn resume(journal: Arc<Journal>, id: i64) -> Result<JobHandle> {
-    let row = journal.load_job(id)?.ok_or_else(|| Error::Corrupt(format!("no job {id}")))?;
+    let row = journal
+        .load_job(id)?
+        .ok_or_else(|| Error::Corrupt(format!("no job {id}")))?;
     validate(&row.spec)?;
-    Ok(launch(journal, id, row.spec))
+    Ok(launch(journal, id, row.spec, true))
 }
 
 fn validate(spec: &JobSpec) -> Result<()> {
@@ -114,16 +128,23 @@ fn validate(spec: &JobSpec) -> Result<()> {
         return Err(Error::InvalidPath(spec.dest_dir.clone()));
     }
     for src in &spec.sources {
-        let Some(name) = src.file_name() else { return Err(Error::InvalidPath(src.clone())) };
-        let is_dir = fs::symlink_metadata(src).map(|m| m.is_dir()).unwrap_or(false);
+        let Some(name) = src.file_name() else {
+            return Err(Error::InvalidPath(src.clone()));
+        };
+        let is_dir = fs::symlink_metadata(src)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
         if is_dir && fsx::is_within(&spec.dest_dir.join(name), src) {
-            return Err(Error::DestinationInsideSource { source: src.clone(), dest: spec.dest_dir.clone() });
+            return Err(Error::DestinationInsideSource {
+                source: src.clone(),
+                dest: spec.dest_dir.clone(),
+            });
         }
     }
     Ok(())
 }
 
-fn launch(journal: Arc<Journal>, id: i64, spec: JobSpec) -> JobHandle {
+fn launch(journal: Arc<Journal>, id: i64, spec: JobSpec, resumed: bool) -> JobHandle {
     let shared = Arc::new(Shared {
         id,
         spec,
@@ -132,13 +153,17 @@ fn launch(journal: Arc<Journal>, id: i64, spec: JobSpec) -> JobHandle {
         progress: Progress::default(),
         state: Mutex::new(JobState::Running),
         report: Mutex::new(Report::default()),
+        resumed,
     });
     let s = shared.clone();
     let t = thread::Builder::new()
         .name(format!("tufan-job-{id}"))
         .spawn(move || run(s))
         .expect("spawn job thread");
-    JobHandle { shared, thread: Mutex::new(Some(t)) }
+    JobHandle {
+        shared,
+        thread: Mutex::new(Some(t)),
+    }
 }
 
 fn run(s: Arc<Shared>) {
@@ -175,7 +200,9 @@ fn run_inner(s: &Arc<Shared>) -> Result<()> {
     if is_move {
         let dest_dev = fsx::device_of(&s.spec.dest_dir);
         sources.retain(|src| {
-            let Some(name) = src.file_name() else { return true };
+            let Some(name) = src.file_name() else {
+                return true;
+            };
             if dest_dev.is_none() || fsx::device_of(src) != dest_dev {
                 return true;
             }
@@ -210,7 +237,14 @@ fn run_inner(s: &Arc<Shared>) -> Result<()> {
         );
     }
 
-    let scan = scanner::scan(&sources, &s.spec.dest_dir, &tx, &s.control, &s.progress, is_move);
+    let scan = scanner::scan(
+        &sources,
+        &s.spec.dest_dir,
+        &tx,
+        &s.control,
+        &s.progress,
+        is_move,
+    );
     drop(tx);
     for w in workers {
         let _ = w.join();
@@ -260,7 +294,10 @@ fn worker(s: &Shared, rx: &Mutex<Receiver<Item>>) {
                 // relies on it to finish a move or resume a large file.
                 let rec = match s.journal.item(s.id, &key) {
                     Ok(Some(r)) if matches!(r.state, ItemState::Committed | ItemState::Partial) => {
-                        ItemRecord { error: Some(e.to_string()), ..r }
+                        ItemRecord {
+                            error: Some(e.to_string()),
+                            ..r
+                        }
                     }
                     _ => ItemRecord {
                         key,
@@ -304,11 +341,21 @@ fn with_retry(s: &Shared, mut f: impl FnMut() -> Result<Done>) -> Result<Done> {
     }
 }
 
-fn process_file(s: &Shared, src: &Path, md: &fs::Metadata, dest: &Path, buf: &mut Vec<u8>) -> Result<Done> {
+fn process_file(
+    s: &Shared,
+    src: &Path,
+    md: &fs::Metadata,
+    dest: &Path,
+    buf: &mut Vec<u8>,
+) -> Result<Done> {
     let key = path_key(src);
     let is_move = s.spec.kind == JobKind::Move;
     let src_id = SourceId::of(md);
-    let prior = s.journal.item(s.id, &key).unwrap_or(None);
+    let prior = if s.resumed {
+        s.journal.item(s.id, &key).unwrap_or(None)
+    } else {
+        None
+    };
 
     // Job-level resume: trust a previous result only if the destination is
     // still present with the expected size.
@@ -336,13 +383,21 @@ fn process_file(s: &Shared, src: &Path, md: &fs::Metadata, dest: &Path, buf: &mu
     }
 
     // Copying a file onto itself would destroy it on move.
-    if let (Ok(a), Ok(b)) = (fs::canonicalize(src), fs::canonicalize(dest)) {
-        if a == b {
+    // Compared by identity (dev/inode) to avoid per-file canonicalisation.
+    if let Ok(d) = fs::symlink_metadata(dest) {
+        let did = SourceId::of(&d);
+        if cfg!(unix) && (did.dev, did.ino) == (src_id.dev, src_id.ino) {
             return Err(Error::Conflict(dest.to_path_buf()));
         }
     }
 
-    let ctx = Ctx { job_id: s.id, opts: &s.spec.options, control: &s.control, progress: &s.progress, journal: &s.journal };
+    let ctx = Ctx {
+        job_id: s.id,
+        opts: &s.spec.options,
+        control: &s.control,
+        progress: &s.progress,
+        journal: &s.journal,
+    };
     let outcome = transfer::copy_file(&ctx, src, md, dest, &key, prior.as_ref(), buf)?;
     let rec = |state, dest: Option<PathBuf>| ItemRecord {
         key: key.clone(),
@@ -359,7 +414,10 @@ fn process_file(s: &Shared, src: &Path, md: &fs::Metadata, dest: &Path, buf: &mu
             s.journal.put(s.id, rec(ItemState::Skipped, None))?;
             Ok(Done::Skipped)
         }
-        Outcome::Copied { dest, lost_metadata } => {
+        Outcome::Copied {
+            dest,
+            lost_metadata,
+        } => {
             if !lost_metadata.is_empty() {
                 s.report.lock().unwrap().metadata_not_preserved += 1;
             }
@@ -373,9 +431,18 @@ fn process_file(s: &Shared, src: &Path, md: &fs::Metadata, dest: &Path, buf: &mu
                     fsx::sync_dir(parent).map_err(|e| Error::io(parent, e))?;
                 }
             }
-            s.journal.put_durable(s.id, rec(ItemState::Committed, Some(dest.clone())))?;
+            s.journal
+                .put_durable(s.id, rec(ItemState::Committed, Some(dest.clone())))?;
             faults::hit(Stage::CrashAfterCommit).map_err(|e| Error::io(src, e))?;
-            finish_move(s, src, src_id, Some(&src_id.encode()), &dest, &key, md.len())
+            finish_move(
+                s,
+                src,
+                src_id,
+                Some(&src_id.encode()),
+                &dest,
+                &key,
+                md.len(),
+            )
         }
     }
 }
@@ -391,7 +458,9 @@ fn finish_move(
 ) -> Result<Done> {
     // Never delete a source that differs from what was copied.
     let unchanged = recorded.and_then(SourceId::decode) == Some(current)
-        && fs::symlink_metadata(src).map(|m| SourceId::of(&m) == current).unwrap_or(false);
+        && fs::symlink_metadata(src)
+            .map(|m| SourceId::of(&m) == current)
+            .unwrap_or(false);
     if !unchanged {
         return Err(Error::SourceChanged(src.to_path_buf()));
     }
@@ -401,7 +470,10 @@ fn finish_move(
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => {
             // Partial move: destination is valid and kept; source remains.
-            return Err(Error::io(src, io::Error::new(e.kind(), format!("partial move, source not removed: {e}"))));
+            return Err(Error::io(
+                src,
+                io::Error::new(e.kind(), format!("partial move, source not removed: {e}")),
+            ));
         }
     }
     s.journal.put(
@@ -431,7 +503,9 @@ fn copy_symlink(s: &Shared, src: &Path, dest: &Path) -> Result<Done> {
     if replace {
         // Only ever replace another symlink, never a regular file.
         match fs::symlink_metadata(&dest) {
-            Ok(m) if m.file_type().is_symlink() => fs::remove_file(&dest).map_err(|e| Error::io(&dest, e))?,
+            Ok(m) if m.file_type().is_symlink() => {
+                fs::remove_file(&dest).map_err(|e| Error::io(&dest, e))?
+            }
             Ok(_) => return Err(Error::Conflict(dest)),
             Err(_) => {}
         }

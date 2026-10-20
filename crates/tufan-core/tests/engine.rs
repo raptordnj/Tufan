@@ -16,11 +16,23 @@ fn serial() -> MutexGuard<'static, ()> {
 }
 
 fn opts(integrity: IntegrityMode, conflict: ConflictPolicy) -> Options {
-    Options { integrity, conflict, workers: 4, queue_depth: 16, max_retries: 2, ..Options::default() }
+    Options {
+        integrity,
+        conflict,
+        workers: 4,
+        queue_depth: 16,
+        max_retries: 2,
+        ..Options::default()
+    }
 }
 
 fn spec(kind: JobKind, sources: Vec<PathBuf>, dest: &Path, o: Options) -> JobSpec {
-    JobSpec { kind, sources, dest_dir: dest.to_path_buf(), options: o }
+    JobSpec {
+        kind,
+        sources,
+        dest_dir: dest.to_path_buf(),
+        options: o,
+    }
 }
 
 fn journal(dir: &Path) -> Arc<Journal> {
@@ -29,12 +41,16 @@ fn journal(dir: &Path) -> Arc<Journal> {
 
 fn hash(p: &Path) -> Vec<u8> {
     let mut buf = vec![0; 1 << 16];
-    integrity::hash_all(&mut fs::File::open(p).unwrap(), &mut buf).unwrap().0
+    integrity::hash_all(&mut fs::File::open(p).unwrap(), &mut buf)
+        .unwrap()
+        .0
 }
 
 /// Deterministic pseudo-random bytes.
 fn bytes(len: usize, seed: u64) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    let mut x = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     (0..len)
         .map(|_| {
             x ^= x << 13;
@@ -54,7 +70,11 @@ fn make_tree(root: &Path) {
     fs::write(root.join("ünïcødé 名前.txt"), b"unicode").unwrap();
     fs::write(root.join(format!("{}.txt", "L".repeat(200))), b"long").unwrap();
     for i in 0..500 {
-        fs::write(root.join("a").join(format!("small{i}")), bytes(i * 7, i as u64)).unwrap();
+        fs::write(
+            root.join("a").join(format!("small{i}")),
+            bytes(i * 7, i as u64),
+        )
+        .unwrap();
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink("zero", root.join("link")).unwrap();
@@ -102,7 +122,16 @@ fn copies_tree_verified() {
     let (src, dst) = (t.path().join("src"), t.path().join("dst"));
     make_tree(&src);
     fs::create_dir(&dst).unwrap();
-    let h = start(journal(t.path()), spec(JobKind::Copy, vec![src.clone()], &dst, opts(IntegrityMode::DurableVerified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::DurableVerified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Completed, "{:?}", h.report());
     assert_trees_equal(&src, &dst.join("src"));
     assert!(dst.join("src/empty").is_dir());
@@ -117,7 +146,16 @@ fn copies_fast_mode_and_large_file() {
     fs::write(&src, bytes(70 << 20, 9)).unwrap(); // crosses a checkpoint
     let dst = t.path().join("out");
     fs::create_dir(&dst).unwrap();
-    let h = start(journal(t.path()), spec(JobKind::Copy, vec![src.clone()], &dst, opts(IntegrityMode::Fast, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Fast, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Completed);
     assert_eq!(hash(&src), hash(&dst.join("big.bin")));
     let s = h.snapshot();
@@ -134,7 +172,19 @@ fn conflict_policies() {
     fs::create_dir(&dst).unwrap();
     fs::write(dst.join("f.txt"), b"old").unwrap();
     let j = journal(t.path());
-    let run = |c| start(j.clone(), spec(JobKind::Copy, vec![src.clone()], &dst, opts(IntegrityMode::Verified, c))).unwrap().wait();
+    let run = |c| {
+        start(
+            j.clone(),
+            spec(
+                JobKind::Copy,
+                vec![src.clone()],
+                &dst,
+                opts(IntegrityMode::Verified, c),
+            ),
+        )
+        .unwrap()
+        .wait()
+    };
 
     assert_eq!(run(ConflictPolicy::Fail), JobState::Failed);
     assert_eq!(fs::read(dst.join("f.txt")).unwrap(), b"old");
@@ -152,8 +202,19 @@ fn rejects_destination_inside_source() {
     let t = tempfile::tempdir().unwrap();
     let src = t.path().join("s");
     fs::create_dir_all(src.join("inner")).unwrap();
-    let r = start(journal(t.path()), spec(JobKind::Copy, vec![src.clone()], &src.join("inner"), Options::default()));
-    assert!(matches!(r, Err(tufan_core::Error::DestinationInsideSource { .. })));
+    let r = start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &src.join("inner"),
+            Options::default(),
+        ),
+    );
+    assert!(matches!(
+        r,
+        Err(tufan_core::Error::DestinationInsideSource { .. })
+    ));
 }
 
 #[test]
@@ -164,11 +225,30 @@ fn move_cross_directory_removes_sources() {
     make_tree(&src);
     let reference = t.path().join("ref");
     fs::create_dir(&reference).unwrap();
-    start(journal(t.path()), spec(JobKind::Copy, vec![src.clone()], &reference, Options::default())).unwrap().wait();
+    start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &reference,
+            Options::default(),
+        ),
+    )
+    .unwrap()
+    .wait();
     fs::create_dir(&dst).unwrap();
     // Pre-existing destination forces the per-file move path.
     fs::create_dir(dst.join("src")).unwrap();
-    let h = start(journal(t.path()), spec(JobKind::Move, vec![src.clone()], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Move,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Completed, "{:?}", h.report());
     assert!(!src.exists(), "source tree should be gone");
     assert_trees_equal(&reference.join("src"), &dst.join("src"));
@@ -182,7 +262,11 @@ fn move_same_fs_rename() {
     make_tree(&src);
     let dst = t.path().join("dst");
     fs::create_dir(&dst).unwrap();
-    let h = start(journal(t.path()), spec(JobKind::Move, vec![src.clone()], &dst, Options::default())).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(JobKind::Move, vec![src.clone()], &dst, Options::default()),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Completed);
     assert!(!src.exists());
     assert!(dst.join("tree/a/b/c/d/e/deep.bin").is_file());
@@ -197,7 +281,16 @@ fn verify_fault_never_publishes() {
     let dst = t.path().join("d");
     fs::create_dir(&dst).unwrap();
     faults::arm(Stage::Verify, 100);
-    let h = start(journal(t.path()), spec(JobKind::Copy, vec![src], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Failed);
     assert!(!dst.join("x").exists());
     no_temps(&dst);
@@ -213,7 +306,16 @@ fn publish_fault_keeps_existing_destination() {
     fs::create_dir(&dst).unwrap();
     fs::write(dst.join("x"), b"original").unwrap();
     faults::arm(Stage::Publish, 100);
-    let h = start(journal(t.path()), spec(JobKind::Copy, vec![src], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Overwrite))).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Overwrite),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Failed);
     assert_eq!(fs::read(dst.join("x")).unwrap(), b"original");
     no_temps(&dst);
@@ -231,7 +333,16 @@ fn write_fault_retries_then_succeeds() {
     // `resume` retries the failed item.
     faults::arm(Stage::Write, 1);
     let j = journal(t.path());
-    let h = start(j.clone(), spec(JobKind::Copy, vec![src.clone()], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        j.clone(),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Failed);
     let h2 = tufan_core::resume(j, h.id()).unwrap();
     assert_eq!(h2.wait(), JobState::Completed);
@@ -248,10 +359,23 @@ fn source_delete_failure_is_partial_move() {
     let dst = t.path().join("d");
     fs::create_dir_all(dst.join("s")).unwrap();
     faults::arm(Stage::SourceDelete, 1);
-    let h = start(journal(t.path()), spec(JobKind::Move, vec![src.clone()], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Move,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::Failed);
     assert_eq!(fs::read(src.join("f")).unwrap(), b"data", "source kept");
-    assert_eq!(fs::read(dst.join("s/f")).unwrap(), b"data", "destination kept");
+    assert_eq!(
+        fs::read(dst.join("s/f")).unwrap(),
+        b"data",
+        "destination kept"
+    );
 }
 
 #[test]
@@ -267,7 +391,16 @@ fn crash_after_commit_recovers_move() {
     fs::create_dir_all(dst.join("s")).unwrap();
     let j = journal(t.path());
     faults::arm(Stage::CrashAfterCommit, 5);
-    let h = start(j.clone(), spec(JobKind::Move, vec![src.clone()], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        j.clone(),
+        spec(
+            JobKind::Move,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     assert_eq!(h.wait(), JobState::PartiallyCompleted);
     // Committed-but-not-deleted sources still exist alongside destinations.
     let left = fs::read_dir(&src).unwrap().count();
@@ -290,7 +423,16 @@ fn cancel_leaves_no_partial_files_visible() {
     }
     let dst = t.path().join("d");
     fs::create_dir(&dst).unwrap();
-    let h = start(journal(t.path()), spec(JobKind::Copy, vec![src.clone()], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        journal(t.path()),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     h.pause();
     std::thread::sleep(std::time::Duration::from_millis(50));
     h.resume();
@@ -312,7 +454,10 @@ fn large_file_resume_from_checkpoint() {
     let dst = t.path().join("d");
     fs::create_dir(&dst).unwrap();
     let j = journal(t.path());
-    let o = Options { buffer_size: 1 << 20, ..opts(IntegrityMode::Verified, ConflictPolicy::Fail) };
+    let o = Options {
+        buffer_size: 1 << 20,
+        ..opts(IntegrityMode::Verified, ConflictPolicy::Fail)
+    };
     // Fail on the 150th buffer write (~150 MiB, after two checkpoints).
     faults::arm(Stage::Write, 0);
     let h = start(j.clone(), spec(JobKind::Copy, vec![src.clone()], &dst, o)).unwrap();
@@ -342,7 +487,16 @@ fn corrupt_checkpoint_restarts_file() {
     let dst = t.path().join("d");
     fs::create_dir(&dst).unwrap();
     let j = journal(t.path());
-    let h = start(j.clone(), spec(JobKind::Copy, vec![src.clone()], &dst, opts(IntegrityMode::Verified, ConflictPolicy::Fail))).unwrap();
+    let h = start(
+        j.clone(),
+        spec(
+            JobKind::Copy,
+            vec![src.clone()],
+            &dst,
+            opts(IntegrityMode::Verified, ConflictPolicy::Fail),
+        ),
+    )
+    .unwrap();
     while h.snapshot().bytes_done < 100 << 20 && !h.is_finished() {
         std::thread::yield_now();
     }
@@ -367,13 +521,25 @@ fn source_change_is_detected() {
     fs::write(&src, bytes(80 << 20, 13)).unwrap();
     let dst = t.path().join("d");
     fs::create_dir(&dst).unwrap();
-    let o = Options { max_retries: 0, ..opts(IntegrityMode::Verified, ConflictPolicy::Fail) };
-    let h = start(journal(t.path()), spec(JobKind::Copy, vec![src.clone()], &dst, o)).unwrap();
+    let o = Options {
+        max_retries: 0,
+        ..opts(IntegrityMode::Verified, ConflictPolicy::Fail)
+    };
+    let h = start(
+        journal(t.path()),
+        spec(JobKind::Copy, vec![src.clone()], &dst, o),
+    )
+    .unwrap();
     while h.snapshot().bytes_done < 1 << 20 && !h.is_finished() {
         std::thread::yield_now();
     }
     use std::io::Write;
-    fs::OpenOptions::new().append(true).open(&src).unwrap().write_all(b"more").unwrap();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&src)
+        .unwrap()
+        .write_all(b"more")
+        .unwrap();
     assert_eq!(h.wait(), JobState::Failed);
     assert!(!dst.join("grow").exists());
 }
@@ -385,7 +551,13 @@ fn invalid_journal_rows_are_rejected() {
     let p = t.path().join("j.sqlite3");
     {
         let j = Journal::open(&p).unwrap();
-        j.create_job(&spec(JobKind::Copy, vec![t.path().join("x")], t.path(), Options::default())).unwrap();
+        j.create_job(&spec(
+            JobKind::Copy,
+            vec![t.path().join("x")],
+            t.path(),
+            Options::default(),
+        ))
+        .unwrap();
     }
     let c = rusqlite_conn(&p);
     c.execute("UPDATE jobs SET kind = 'bogus'", []).unwrap();

@@ -19,7 +19,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
     pub fn io(path: impl Into<PathBuf>, source: io::Error) -> Self {
-        Error::Io { path: path.into(), source }
+        Error::Io {
+            path: path.into(),
+            source,
+        }
     }
 
     /// Transient failures worth retrying with backoff. Permanent errors

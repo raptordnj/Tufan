@@ -138,7 +138,10 @@ fn path_from_bytes(b: &[u8]) -> Option<PathBuf> {
 }
 
 fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 impl Journal {
@@ -191,7 +194,13 @@ impl Journal {
             SCHEMA_VERSION => {}
             v => return Err(Error::Corrupt(format!("unsupported schema version {v}"))),
         }
-        Ok(Journal { inner: Mutex::new(Inner { conn, pending: Vec::new(), oldest: None }) })
+        Ok(Journal {
+            inner: Mutex::new(Inner {
+                conn,
+                pending: Vec::new(),
+                oldest: None,
+            }),
+        })
     }
 
     pub fn create_job(&self, spec: &JobSpec) -> Result<i64> {
@@ -258,13 +267,19 @@ impl Journal {
 
     pub fn delete_job(&self, id: i64) -> Result<()> {
         let g = self.inner.lock().unwrap();
-        g.conn.execute("DELETE FROM jobs WHERE id = ?1", params![id])?;
+        g.conn
+            .execute("DELETE FROM jobs WHERE id = ?1", params![id])?;
         Ok(())
     }
 
     pub fn item(&self, job: i64, key: &[u8]) -> Result<Option<ItemRecord>> {
         let g = self.inner.lock().unwrap();
-        if let Some((_, r)) = g.pending.iter().rev().find(|(j, r)| *j == job && r.key == key) {
+        if let Some((_, r)) = g
+            .pending
+            .iter()
+            .rev()
+            .find(|(j, r)| *j == job && r.key == key)
+        {
             return Ok(Some(r.clone()));
         }
         let r = g
@@ -322,7 +337,8 @@ impl Journal {
         let mut g = self.inner.lock().unwrap();
         g.pending.push((job, rec));
         g.oldest.get_or_insert_with(Instant::now);
-        let due = g.pending.len() >= BATCH_ROWS || g.oldest.is_some_and(|t| t.elapsed() >= BATCH_AGE);
+        let due =
+            g.pending.len() >= BATCH_ROWS || g.oldest.is_some_and(|t| t.elapsed() >= BATCH_AGE);
         if due {
             flush_locked(&mut g)?;
         }
@@ -388,7 +404,16 @@ fn row_to_job(r: &rusqlite::Row<'_>) -> rusqlite::Result<Result<JobRow>> {
             .collect::<Result<Vec<_>>>()?;
         let dest_dir = path_from_bytes(&dest).ok_or_else(|| bad("dest path"))?;
         let options = decode_options(&options).ok_or_else(|| bad("options"))?;
-        Ok(JobRow { id, spec: JobSpec { kind, sources, dest_dir, options }, state })
+        Ok(JobRow {
+            id,
+            spec: JobSpec {
+                kind,
+                sources,
+                dest_dir,
+                options,
+            },
+            state,
+        })
     })())
 }
 
@@ -425,18 +450,20 @@ fn decode_options(s: &str) -> Option<Options> {
 
 /// Default journal location (per-user data directory).
 pub fn default_path() -> PathBuf {
-    let base = std::env::var_os("TUFAN_HOME").map(PathBuf::from).unwrap_or_else(|| {
-        #[cfg(windows)]
-        let b = std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Tufan"));
-        #[cfg(target_os = "macos")]
-        let b = std::env::var_os("HOME")
-            .map(|h| PathBuf::from(h).join("Library/Application Support/Tufan"));
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let b = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .map(|p| p.join("tufan"));
-        b.unwrap_or_else(|| PathBuf::from(OsString::from(".tufan")))
-    });
+    let base = std::env::var_os("TUFAN_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            #[cfg(windows)]
+            let b = std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("Tufan"));
+            #[cfg(target_os = "macos")]
+            let b = std::env::var_os("HOME")
+                .map(|h| PathBuf::from(h).join("Library/Application Support/Tufan"));
+            #[cfg(not(any(windows, target_os = "macos")))]
+            let b = std::env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+                .map(|p| p.join("tufan"));
+            b.unwrap_or_else(|| PathBuf::from(OsString::from(".tufan")))
+        });
     base.join("journal.sqlite3")
 }

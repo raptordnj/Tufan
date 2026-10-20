@@ -1,0 +1,28 @@
+# Maintainer: Tufan developers
+pkgname=tufan
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Safe, fast, resumable file copy and move (GTK 4)"
+arch=('x86_64' 'aarch64')
+license=('MIT' 'Apache-2.0')
+depends=('gtk4')
+makedepends=('cargo')
+source=()
+
+build() {
+  cd "$startdir/../.."
+  cargo build --release --locked --workspace
+}
+
+check() {
+  cd "$startdir/../.."
+  cargo test --release --locked -p tufan-core
+}
+
+package() {
+  cd "$startdir/../.."
+  install -Dm755 target/release/tufan "$pkgdir/usr/bin/tufan"
+  install -Dm755 target/release/tufan-gtk "$pkgdir/usr/bin/tufan-gtk"
+  install -Dm644 packaging/linux/org.tufan.Tufan.desktop "$pkgdir/usr/share/applications/org.tufan.Tufan.desktop"
+  install -Dm644 packaging/linux/org.tufan.Tufan.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.tufan.Tufan.svg"
+}
