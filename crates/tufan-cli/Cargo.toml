@@ -1,0 +1,12 @@
+[package]
+name = "tufan-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tufan"
+path = "src/main.rs"
+
+[dependencies]
+tufan-core = { path = "../tufan-core" }
