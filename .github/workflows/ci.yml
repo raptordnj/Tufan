@@ -34,3 +34,9 @@ jobs:
             mingw-w64-ucrt-x86_64-rust mingw-w64-ucrt-x86_64-gtk4
             mingw-w64-ucrt-x86_64-pkgconf mingw-w64-ucrt-x86_64-binutils
       - run: cargo clippy --release -p tufan-gtk -- -D warnings
+  gtk-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: brew install gtk4 pkg-config
+      - run: cargo clippy --release -p tufan-gtk -- -D warnings

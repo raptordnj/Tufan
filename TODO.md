@@ -30,3 +30,5 @@
 - [ ] Settings persistence in the UI
 - [ ] Cold-cache, HDD, USB and network benchmarks
 - [ ] Fuzzing of journal decoding; Miri on pure modules
+- [x] Linux/macOS file manager actions (Tufan Copy / Cut / Paste with Tufan)
+- [ ] Thunar custom actions installed automatically

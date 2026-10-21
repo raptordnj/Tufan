@@ -129,6 +129,30 @@ Nothing is officially supported yet.
   loaded into Explorer. Turning it on also starts Tufan at login.
 - In the Tufan window, Ctrl+V and drag-and-drop add files as sources.
 
+## Linux and macOS file manager actions (GTK app)
+
+Another app's Ctrl+V cannot be taken over on Linux (Wayland does not allow
+it, and the clipboard is readable only by the focused app), so Tufan adds
+its own actions to the file manager instead. It keeps the list of items to
+paste itself; the system clipboard is not used.
+
+| | Tufan Copy | Tufan Cut | Paste with Tufan |
+|---|---|---|---|
+| Nautilus (GNOME Files) | Ctrl+Shift+C | Ctrl+Shift+X | Ctrl+Shift+V |
+| Dolphin (KDE), Nemo, Caja | right-click menu | right-click menu | right-click menu |
+| Finder (macOS) | Quick Actions / Services | Quick Actions / Services | Quick Actions / Services |
+
+Paste goes into the current folder, or into the selected folder (a selected
+file stands for its folder). A cut is used up by its paste. The Nautilus
+shortcuts are added to `~/.config/nautilus/scripts-accels` only where those
+keys and scripts are not already bound; on macOS, shortcuts can be assigned
+in System Settings > Keyboard > Keyboard Shortcuts > Services.
+
+The actions are written per user each time Tufan starts, for the file
+managers that are installed. `tufan-gtk --remove-integration` removes them.
+Thunar is not set up automatically; add custom actions running
+`tufan-gtk --copy %F`, `tufan-gtk --cut %F` and `tufan-gtk --paste %f`.
+
 ## License
 
 MIT. See `LICENSE`.

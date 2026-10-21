@@ -4,6 +4,10 @@
 // No console window alongside the UI on Windows.
 #![windows_subsystem = "windows"]
 
+#[cfg(not(windows))]
+mod clip;
+#[cfg(not(windows))]
+mod integrate;
 #[cfg(windows)]
 mod win;
 
@@ -82,20 +86,133 @@ struct Ui {
     conflict: gtk4::DropDown,
 }
 
+thread_local! {
+    /// The UI once built, for requests arriving on the command line.
+    static UI: RefCell<Option<(Shared, Ui)>> = const { RefCell::new(None) };
+}
+
 fn main() -> glib::ExitCode {
+    // File manager actions that only record the selection: no UI.
+    #[cfg(not(windows))]
+    if let Some(code) = file_manager_command() {
+        return code;
+    }
     // --background (used by the login entry) starts hidden in the tray.
     let mut args: Vec<String> = std::env::args().collect();
-    let background = args.iter().any(|a| a == "--background");
+    let background = cfg!(windows) && args.iter().any(|a| a == "--background");
     args.retain(|a| a != "--background");
     // GApplication uniqueness needs D-Bus, which Windows lacks.
     #[cfg(windows)]
     if !win::claim_single_instance() {
         return glib::ExitCode::SUCCESS;
     }
-    let app = gtk4::Application::builder().application_id(APP_ID).build();
+    // Command lines are forwarded to a running instance (D-Bus), so a
+    // paste from the file manager joins the open window's job list.
+    let app = gtk4::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+    app.add_main_option(
+        "paste",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::Filename,
+        "Paste what Tufan Copy / Tufan Cut recorded into FOLDER",
+        Some("FOLDER"),
+    );
     let first = Cell::new(true);
-    app.connect_activate(move |app| activate(app, background && first.replace(false)));
+    app.connect_command_line(move |app, cl| {
+        let paste = cl
+            .options_dict()
+            .lookup::<PathBuf>("paste")
+            .ok()
+            .flatten()
+            .map(|t| paste_target(&t, cl.cwd().unwrap_or_default()));
+        // Pasting needs only the progress window.
+        let quiet = paste.is_some() || (background && first.get());
+        first.set(false);
+        activate(app, !quiet);
+        if let Some(dest) = paste {
+            paste_into(dest);
+        }
+        glib::ExitCode::SUCCESS
+    });
     app.run_with_args(&args)
+}
+
+/// `tufan-gtk --copy|--cut PATH...` and `--remove-integration`.
+#[cfg(not(windows))]
+fn file_manager_command() -> Option<glib::ExitCode> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let kind = match args.get(1)?.to_str()? {
+        "--copy" => JobKind::Copy,
+        "--cut" => JobKind::Move,
+        "--remove-integration" => {
+            integrate::remove();
+            return Some(glib::ExitCode::SUCCESS);
+        }
+        _ => return None,
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let paths: Vec<PathBuf> = args[2..]
+        .iter()
+        .map(|a| paste_target_raw(Path::new(a), &cwd))
+        .collect();
+    Some(match clip::store(kind, &paths, &cwd) {
+        Ok(()) => glib::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("tufan: cannot record the selection: {e}");
+            glib::ExitCode::FAILURE
+        }
+    })
+}
+
+/// A path or file:// URI (file managers pass either), made absolute.
+fn paste_target_raw(t: &Path, cwd: &Path) -> PathBuf {
+    let s = t.to_string_lossy();
+    if s.starts_with("file://") {
+        if let Some(p) = gio::File::for_uri(&s).path() {
+            return p;
+        }
+    }
+    cwd.join(t)
+}
+
+/// The folder to paste into: a selected file stands for its folder.
+fn paste_target(t: &Path, cwd: PathBuf) -> PathBuf {
+    let p = paste_target_raw(t, &cwd);
+    match p.parent() {
+        Some(parent) if p.is_file() => parent.to_path_buf(),
+        _ => p,
+    }
+}
+
+/// Starts the transfer recorded by Tufan Copy / Tufan Cut.
+fn paste_into(dest: PathBuf) {
+    let Some((state, ui)) = UI.with(|u| u.borrow().clone()) else {
+        return;
+    };
+    #[cfg(not(windows))]
+    let recorded = clip::load();
+    #[cfg(windows)]
+    let recorded: Option<(JobKind, Vec<PathBuf>)> = None;
+    let Some((kind, sources)) = recorded else {
+        ui.window.present();
+        alert(
+            &ui.window,
+            "Nothing to paste. Use \u{201c}Tufan Copy\u{201d} or \u{201c}Tufan Cut\u{201d} in the file manager first.",
+        );
+        return;
+    };
+    match start_job(&state, &ui, kind, sources, dest) {
+        #[cfg(not(windows))]
+        Ok(()) if kind == JobKind::Move => clip::clear(),
+        Ok(()) => {}
+        Err(e) => {
+            ui.window.present();
+            alert(&ui.window, &e);
+        }
+    }
 }
 
 /// GTK 4.20 deprecates gtk-application-prefer-dark-theme in favour of
@@ -111,15 +228,21 @@ fn set_dark(s: &gtk4::Settings, dark: bool) {
     }
 }
 
-fn activate(app: &gtk4::Application, background: bool) {
+fn activate(app: &gtk4::Application, show: bool) {
     // Single instance: a second launch re-presents the existing window.
     if let Some(w) = app
         .windows()
         .into_iter()
         .find(|w| w.is::<gtk4::ApplicationWindow>())
     {
-        w.present();
+        if show {
+            w.present();
+        }
         return;
+    }
+    #[cfg(not(windows))]
+    if let Err(e) = integrate::install() {
+        eprintln!("tufan: file manager integration not installed: {e}");
     }
     let provider = gtk4::CssProvider::new();
     provider.load_from_data(CSS);
@@ -419,9 +542,21 @@ fn activate(app: &gtk4::Application, background: bool) {
     }
 
     {
-        let (state, summary) = (state.clone(), summary.clone());
+        let (state, summary, app) = (state.clone(), summary.clone(), app.clone());
         glib::timeout_add_local(Duration::from_millis(250), move || {
             tick(&state, &summary);
+            // Without a tray, nothing is left to show once every window is
+            // closed and no job runs (e.g. a paste from the file manager).
+            #[cfg(not(windows))]
+            if !any_active(&state)
+                && gtk4::Window::list_toplevels()
+                    .iter()
+                    .all(|w| !w.is_visible())
+            {
+                app.quit();
+            }
+            #[cfg(windows)]
+            let _ = &app;
             glib::ControlFlow::Continue
         });
     }
@@ -460,7 +595,8 @@ fn activate(app: &gtk4::Application, background: bool) {
         });
     }
 
-    if !(cfg!(windows) && background) {
+    UI.with(|u| *u.borrow_mut() = Some((state.clone(), ui.clone())));
+    if show {
         window.present();
     }
 }
