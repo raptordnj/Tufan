@@ -1,11 +1,11 @@
 ; Tufan NSIS installer.
-; Build: makensis -DVERSION=0.2.1 -DARCH=x86_64 -DBINDIR=<dir with tufan.exe, tufan-gtk.exe, GTK DLLs> tufan.nsi
+; Build: makensis -DVERSION=0.2.2 -DARCH=x86_64 -DBINDIR=<dir with tufan.exe, tufan-gtk.exe, GTK DLLs> tufan.nsi
 Unicode true
 !include "MUI2.nsh"
 !include "x64.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.2.1"
+  !define VERSION "0.2.2"
 !endif
 !ifndef ARCH
   !define ARCH "x86_64"
