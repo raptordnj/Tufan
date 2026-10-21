@@ -31,6 +31,7 @@ VIAddVersionKey "LegalCopyright" "Tufan developers"
 !define MUI_UNICON "tufan.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\tufan-gtk.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch Tufan"
+!insertmacro MUI_PAGE_LICENSE "..\..\LICENSE"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES

@@ -24,12 +24,13 @@ jobs:
       - name: Package
         run: |
           V=${GITHUB_REF_NAME#v}; N=tufan-$V-linux-${{ matrix.arch }}
-          mkdir -p $N && cp target/release/tufan target/release/tufan-gtk README.md packaging/linux/* $N/
+          mkdir -p $N && cp target/release/tufan target/release/tufan-gtk README.md LICENSE packaging/linux/* $N/
           tar czf $N.tar.gz $N
           D=deb/usr; mkdir -p $D/bin $D/share/applications $D/share/icons/hicolor/scalable/apps deb/DEBIAN
           cp target/release/tufan target/release/tufan-gtk $D/bin/
           cp packaging/linux/org.tufan.Tufan.desktop $D/share/applications/
           cp packaging/linux/org.tufan.Tufan.svg $D/share/icons/hicolor/scalable/apps/
+          install -Dm644 LICENSE $D/share/doc/tufan/copyright
           DA=$([ ${{ matrix.arch }} = x86_64 ] && echo amd64 || echo arm64)
           printf 'Package: tufan\nVersion: %s\nArchitecture: %s\nMaintainer: Tufan developers\nDepends: libgtk-4-1 (>= 4.10)\nDescription: Safe, fast, resumable file copy and move\n' "$V" "$DA" > deb/DEBIAN/control
           dpkg-deb --build --root-owner-group deb tufan_${V}_${DA}.deb
@@ -39,7 +40,7 @@ jobs:
           Version: $V
           Release: 1
           Summary: Safe, fast, resumable file copy and move
-          License: MIT OR Apache-2.0
+          License: MIT
           Requires: gtk4 >= 4.10
           %description
           Safe, fast, resumable file copy and move.
@@ -51,6 +52,7 @@ jobs:
           /usr/bin/tufan-gtk
           /usr/share/applications/org.tufan.Tufan.desktop
           /usr/share/icons/hicolor/scalable/apps/org.tufan.Tufan.svg
+          /usr/share/doc/tufan/copyright
           SPEC
           sed -i 's/^          //' rpm/SPECS/tufan.spec
           rpmbuild --define "_topdir $PWD/rpm" --define "debug_package %{nil}" -bb rpm/SPECS/tufan.spec
@@ -79,7 +81,7 @@ jobs:
       - name: Package
         run: |
           N=tufan-${GITHUB_REF_NAME#v}-macos-${{ matrix.arch }}
-          mkdir -p $N && cp target/release/tufan target/release/tufan-gtk README.md $N/
+          mkdir -p $N && cp target/release/tufan target/release/tufan-gtk README.md LICENSE $N/
           echo "tufan-gtk needs GTK 4 from Homebrew: brew install gtk4" > $N/REQUIREMENTS.txt
           tar czf $N.tar.gz $N
           A=Tufan.app/Contents; mkdir -p $A/MacOS
@@ -114,7 +116,7 @@ jobs:
       - name: Bundle GTK runtime
         run: |
           mkdir -p dist/share dist/lib
-          cp target/release/tufan.exe target/release/tufan-gtk.exe README.md dist/
+          cp target/release/tufan.exe target/release/tufan-gtk.exe README.md LICENSE dist/
           ldd dist/tufan-gtk.exe dist/tufan.exe | awk '/ucrt64/ {print $3}' | sort -u | xargs -I{} cp {} dist/
           cp -r /ucrt64/lib/gdk-pixbuf-2.0 dist/lib/
           mkdir -p dist/share/glib-2.0 && cp -r /ucrt64/share/glib-2.0/schemas dist/share/glib-2.0/
@@ -147,7 +149,7 @@ jobs:
             cargo test --release -p tufan-core
             cargo build --release -p tufan-cli
             N=tufan-${GITHUB_REF_NAME#v}-freebsd-x86_64-cli
-            mkdir -p $N && cp target/release/tufan README.md $N/
+            mkdir -p $N && cp target/release/tufan README.md LICENSE $N/
             tar czf $N.tar.gz $N
       - uses: actions/upload-artifact@v5
         with:

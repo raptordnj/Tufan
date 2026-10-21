@@ -128,3 +128,7 @@ Nothing is officially supported yet.
   It uses a low-level keyboard hook in Tufan's own process; nothing is
   loaded into Explorer. Turning it on also starts Tufan at login.
 - In the Tufan window, Ctrl+V and drag-and-drop add files as sources.
+
+## License
+
+MIT. See `LICENSE`.
